@@ -1,0 +1,18 @@
+# Cloudflare quick tunnel to ROSE, for claude.ai / phone. Fails closed: shuts down unless the
+# public URL rejects unauthenticated requests. The URL changes each time this service restarts.
+# Install:  cp deploy/rose-tunnel.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#           systemctl --user enable --now rose-tunnel
+[Unit]
+Description=ROSE remote access (Cloudflare quick tunnel)
+After=network-online.target rose.service
+Wants=rose.service
+
+[Service]
+ExecStart=%h/.local/bin/rose tunnel
+Environment=DISPLAY=:0
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
