@@ -1,4 +1,8 @@
-"""Screenshot tool: saves a PNG under ~/rose/screenshots/ and returns the path (and a preview image).
+"""Screenshot tool (FALLBACK): saves a PNG under ~/rose/screenshots/ and returns the path (and a preview).
+
+ROSE is tree-first: ui_list / ui_read / browser_read are the normal way to observe. Screenshots are for
+apps with no accessibility tree, diagnosing a failed read-back, or visual questions. By default only the
+active window's monitor is sent (not the whole multi-monitor desktop), downscaled.
 
 The preview sent to Claude is downscaled, so this module remembers how the last preview maps back to
 real screen pixels. Input tools use that mapping so Claude can click on what it sees.
@@ -73,23 +77,69 @@ def take_screenshot() -> str:
     return str(out)
 
 
-def preview_jpeg(path: str, monitor: int | None = None, quality: int = 80) -> tuple[bytes, str]:
-    """Downscaled JPEG of a screenshot (optionally cropped to one monitor) for Claude.
+def _monitor_rect(monitor: int) -> tuple[int, int, int, int]:
+    mons = {m["index"]: m for m in monitors()}
+    if monitor not in mons:
+        raise ToolError(f"No monitor {monitor}. Monitors: {list(mons.values()) or 'unknown'}")
+    m = mons[monitor]
+    return m["x"], m["y"], m["width"], m["height"]
+
+
+def resolve_area(area: str = "auto", monitor: int | None = None) -> tuple[tuple[int, int, int, int] | None, str]:
+    """Which part of the screen to show: (rect x, y, w, h or None for everything, a label).
+
+    auto: the given monitor, else the monitor holding the active window (whole screen if only one).
+    active_window: just the active window. monitor: the given monitor. desktop: everything."""
+    if monitor is not None and area in ("auto", "monitor"):
+        return _monitor_rect(monitor), f"monitor {monitor}"
+    if area == "desktop":
+        return None, "full desktop"
+    if area == "monitor":
+        raise ToolError("area='monitor' needs monitor=<index> (see list_monitors).")
+    try:
+        from rose.tools.apps import list_windows
+        act = next((w for w in list_windows() if w.get("active")), None)
+    except Exception:
+        act = None
+    if act is None:
+        return None, "full desktop (no active window found)"
+    if area == "active_window":
+        return (act["x"], act["y"], act["width"], act["height"]), f"active window '{act['title'][:60]}'"
+    mons = monitors()
+    if len(mons) <= 1:
+        return None, "full screen"
+    cx, cy = act["x"] + act["width"] // 2, act["y"] + act["height"] // 2
+    for m in mons:
+        if m["x"] <= cx < m["x"] + m["width"] and m["y"] <= cy < m["y"] + m["height"]:
+            return (m["x"], m["y"], m["width"], m["height"]), f"monitor {m['index']} (has the active window)"
+    return None, "full desktop"
+
+
+def _clamp(img, rect):
+    x, y, w, h = rect
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(img.width, x + w), min(img.height, y + h)
+    if x1 <= x0 or y1 <= y0:
+        raise ToolError("That area is off-screen.")
+    return x0, y0, x1, y1
+
+
+def preview_jpeg(path: str, monitor: int | None = None, quality: int = 80,
+                 rect: tuple[int, int, int, int] | None = None) -> tuple[bytes, str]:
+    """Downscaled JPEG of a screenshot (optionally cropped to one monitor or a rect) for Claude.
 
     Records the preview -> screen mapping and returns (jpeg bytes, a note describing it)."""
     global last_mapping
     from PIL import Image as PILImage
 
+    if rect is None and monitor is not None:
+        rect = _monitor_rect(monitor)
     with PILImage.open(path) as img:
         img = img.convert("RGB")
         ox = oy = 0
-        if monitor is not None:
-            mons = {m["index"]: m for m in monitors()}
-            if monitor not in mons:
-                raise ToolError(f"No monitor {monitor}. Monitors: {list(mons.values()) or 'unknown'}")
-            m = mons[monitor]
-            ox, oy = m["x"], m["y"]
-            img = img.crop((ox, oy, ox + m["width"], oy + m["height"]))
+        if rect is not None:
+            ox, oy, x1, y1 = _clamp(img, rect)
+            img = img.crop((ox, oy, x1, y1))
         full_w, full_h = img.size
         img.thumbnail((MAX_SIDE, MAX_SIDE))
         scale = full_w / img.width
@@ -97,12 +147,13 @@ def preview_jpeg(path: str, monitor: int | None = None, quality: int = 80) -> tu
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=quality, optimize=True)
     note = (f"Preview is {img.width}x{img.height}px (1 preview px = {scale:.3f} screen px"
-            + (f", monitor {monitor} at offset {ox},{oy}" if monitor is not None else "")
+            + (f", area at offset {ox},{oy}" if (ox or oy) else "")
             + "). Input tools take coordinates in this preview by default.")
     return buf.getvalue(), note
 
 
-def screen_text(path: str, monitor: int | None = None, max_chars: int = 4000) -> str:
+def screen_text(path: str, monitor: int | None = None, max_chars: int = 4000,
+                rect: tuple[int, int, int, int] | None = None) -> str:
     """Text version of a screenshot for clients that can't see images (e.g. Claude voice mode):
     the open windows on that screen (active one marked) and OCR of what's visible."""
     import subprocess
@@ -112,10 +163,12 @@ def screen_text(path: str, monitor: int | None = None, max_chars: int = 4000) ->
 
     ox = oy = 0
     w = h = None
-    if monitor is not None:
+    if rect is None and monitor is not None:
         m = {x["index"]: x for x in monitors()}.get(monitor)
         if m:
-            ox, oy, w, h = m["x"], m["y"], m["width"], m["height"]
+            rect = (m["x"], m["y"], m["width"], m["height"])
+    if rect is not None:
+        ox, oy, w, h = rect
     lines = []
     try:
         from rose.tools.apps import list_windows
@@ -129,7 +182,7 @@ def screen_text(path: str, monitor: int | None = None, max_chars: int = 4000) ->
         try:
             with PILImage.open(path) as img:
                 if w is not None:
-                    img = img.crop((ox, oy, ox + w, oy + h))
+                    img = img.crop(_clamp(img, (ox, oy, w, h)))
                 buf = BytesIO()
                 img.convert("L").save(buf, format="PNG")
             ocr = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "3", "-l", "eng"], input=buf.getvalue(),

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 # Allow `uv run rose/server.py` (which puts rose/ itself on sys.path) to import the `rose` package.
@@ -20,11 +21,13 @@ from mcp.types import ToolAnnotations  # noqa: E402
 from rose import guard  # noqa: E402
 from rose.common import logged  # noqa: E402
 from rose.config import load_config  # noqa: E402
-from rose import maintenance, push as pushmod, watch  # noqa: E402
+from rose import maintenance, metrics, push as pushmod, watch  # noqa: E402
 from rose.tools import apps, browser, bridge, clipboard, device, ui, files, forge, github, quick, input, notify, screenshot, system, webcam  # noqa: E402
 
 INSTRUCTIONS = (
     "ROSE controls the user's Linux laptop. ALWAYS PREFER DIRECT TOOLS over screenshots and the mouse. "
+    "OPERATING POLICY for apps and web pages: observe via the tree -> act by name -> read back -> "
+    "screenshot only on failure. "
     "Order of preference: "
     "(1) a dedicated tool: quick_settings / set_quick_setting (Wi-Fi, Bluetooth, airplane, power mode, "
     "night light, dark style, do-not-disturb, caffeine, volume, mute, brightness, auto-suspend, screen "
@@ -35,13 +38,26 @@ INSTRUCTIONS = (
     "file tools, GitHub tools, webcam_capture; "
     "schedule_add (reminders, reports, scheduled Forge tasks); "
     "(2) run_command with one of the user's presets (list_commands); "
-    "(3) for an app's buttons and fields: ui_list / ui_read / ui_click / ui_fill by NAME (no screenshot); "
-    "for websites: ROSE's own browser via browser_start / browser_open / browser_read / browser_click / "
-    "browser_fill / browser_press (separate profile: the user logs in there once, e.g. WhatsApp Web); "
-    "(4) only if nothing above can do it, operate the GUI: focus the window, take_screenshot, then "
-    "mouse_click / type_text / press_keys with coordinates from that screenshot, and screenshot again to "
-    "verify. Never use screenshots+clicks for something a direct tool does (e.g. don't click the Wi-Fi "
-    "toggle; call set_quick_setting). Use take_screenshot freely when the user asks what's on screen. "
+    "(3) for an app's buttons and fields, and for websites, work TREE-FIRST (no screenshots): "
+    "OBSERVE with ui_list / ui_read (desktop apps, by window title or app name) or ROSE's own browser "
+    "(browser_start / browser_open / browser_read / browser_tabs; separate profile: the user logs in "
+    "there once, e.g. WhatsApp Web); ACT BY NAME with ui_click / ui_fill / browser_click / browser_fill / "
+    "browser_press, never by pixel coordinates; READ BACK after typing or any state-changing click "
+    "(ui_read(window, element=...) / ui_list / browser_read) and confirm the expected text or state is in "
+    "the expected element and the active window is still the one you meant. To put text in a field, "
+    "prefer ui_fill (targets the field directly) over type_text. If you must use type_text / press_keys, "
+    "pass window=<the target> so ROSE verifies it is the active window first (or check list_windows and "
+    "focus_window yourself). If a read-back fails (text missing, landed elsewhere, unexpected dialog), "
+    "undo if possible (ctrl+z in the wrong field; never ctrl+z in a terminal), then diagnose. If ui_list "
+    "is empty for a Chromium/Electron app (VS Code, Brave, Slack...), call ui_enable_app_accessibility "
+    "and ask the user before restarting that app, before falling back. "
+    "(4) SCREENSHOT FALLBACK, only when: the tree is empty/unavailable (canvas apps, games, image "
+    "editors, remote desktop/VNC, video, apps without accessibility); a read-back failed and the tree "
+    "doesn't explain why; or the task is visual (the user asks what's on screen or how something looks, "
+    "charts, images). Then take_screenshot (default: just the active window's monitor; area="
+    "'active_window' for less; include_image=false when the OCR text is enough), act with mouse_click / "
+    "type_text / press_keys, and read back again. Never use screenshots+clicks for something a direct "
+    "tool does (e.g. don't click the Wi-Fi toggle; call set_quick_setting). "
     "File tools only work inside list_allowed_dirs. Anything destructive, that sends/submits, or that cuts "
     "the network (Wi-Fi off, airplane on, switching networks, stopping processes, overwriting files, "
     "closing windows, pressing Enter) needs confirm=true: ask the user first. "
@@ -80,16 +96,19 @@ WRITES = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_worl
 DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=False)
 
 
-def take_screenshot(include_image: bool = True, monitor: int | None = None, include_text: bool = True) -> list:
+def take_screenshot(include_image: bool = True, monitor: int | None = None, include_text: bool = True,
+                    area: Literal["auto", "active_window", "monitor", "desktop"] = "auto") -> list:
     path = screenshot.take_screenshot()
+    rect, label = screenshot.resolve_area(area, monitor)
     out = []
     if include_image:
-        data, note = screenshot.preview_jpeg(path, monitor)
-        out += [f"Saved full-resolution screenshot to {path}. {note}", Image(data=data, format="jpeg")]
+        data, note = screenshot.preview_jpeg(path, rect=rect)
+        out += [f"Saved full-resolution screenshot to {path}. Showing {label}. {note}",
+                Image(data=data, format="jpeg")]
     else:
-        out.append(f"Saved screenshot to {path}")
+        out.append(f"Saved screenshot to {path} (text below covers {label}).")
     if include_text:  # for clients that can't see images (Claude voice mode shows "[non-text content]")
-        out.append(screenshot.screen_text(path, monitor))
+        out.append(screenshot.screen_text(path, rect=rect))
     return out
 
 
@@ -129,21 +148,28 @@ def register_tools(mcp: MCPServer) -> None:
     register(
         take_screenshot,
         WRITES,
-        "Capture the screen to a PNG in ~/rose/screenshots/ and return the file path. Also returns the "
-        "screen AS TEXT (open windows + OCR of visible text), which is all you get if your client can't "
-        "show images (e.g. voice mode). With "
-        "include_image=true (default) a downscaled JPEG preview is also returned so you can see the "
-        "screen. Pass monitor=<index> (see list_monitors) to show one monitor at higher detail. "
-        "Input tools (mouse_click, scroll) take coordinates in the latest preview.",
+        "FALLBACK: use only when ui_list / ui_read / browser_read can't see what you need (app with no "
+        "accessibility tree: canvas, game, remote desktop, video), when a read-back check failed and the "
+        "tree doesn't explain why, or when the user asks what's on screen / how something looks. "
+        "Captures the screen to a PNG in ~/rose/screenshots/ and returns the path, plus the screen AS TEXT "
+        "(open windows + OCR of visible text), which is all you get if your client can't show images. "
+        "area='auto' (default) shows only the monitor holding the active window (or monitor=<index>, see "
+        "list_monitors); area='active_window' just that window; area='desktop' everything. Prefer "
+        "include_image=false when the OCR text is enough. Input tools (mouse_click, scroll) take "
+        "coordinates in the latest preview.",
     )
     register(list_monitors, READ_ONLY)
 
     # Mouse & keyboard
-    last = " LAST RESORT: only when no direct tool (quick settings, media, apps, files, run_command...) can do it."
-    register(input.mouse_click, WRITES, input.mouse_click.__doc__ + last)
+    last = (" LAST RESORT: only when no direct tool (quick settings, media, apps, files, run_command...) and "
+            "no tree tool (ui_click / ui_fill / browser_click / browser_fill) can do it.")
+    coords = " Coordinates come from a screenshot, so this follows the screenshot fallback; prefer ui_click by name."
+    keys = (" Verify the target window is active first (pass window=..., or list_windows + focus_window); "
+            "prefer ui_fill when the field is in the tree. Read back afterwards (ui_read).")
+    register(input.mouse_click, WRITES, input.mouse_click.__doc__ + coords + last)
     register(input.scroll, WRITES, input.scroll.__doc__ + last)
-    register(input.type_text, WRITES, input.type_text.__doc__ + last)
-    register(input.press_keys, WRITES, input.press_keys.__doc__ + last)
+    register(input.type_text, WRITES, input.type_text.__doc__ + keys + last)
+    register(input.press_keys, WRITES, input.press_keys.__doc__ + keys + last)
     register(input.mouse_position, READ_ONLY)
 
     # Webcam
@@ -222,7 +248,7 @@ def register_tools(mcp: MCPServer) -> None:
     register(forge.forge_send, ToolAnnotations(read_only_hint=False, destructive_hint=True, open_world_hint=True))
     register(forge.forge_jobs, READ_ONLY)
 
-    # Accessibility: list/read/click/fill controls by name (no screenshots)
+    # Accessibility: list/read/click/fill controls by name (no screenshots). PREFERRED observe/act path.
     register(ui.ui_list, READ_ONLY)
     register(ui.ui_read, READ_ONLY)
     register(ui.ui_click, WRITES)
@@ -247,6 +273,7 @@ def register_tools(mcp: MCPServer) -> None:
     register(watch.watch_status, READ_ONLY)
     register(pushmod.push_status, READ_ONLY)
     register(rose_maintenance, WRITES)
+    register(metrics.observation_stats, READ_ONLY)
 
     # Bridge between the user's Claude accounts and Forge
     register(bridge.bridge_read, READ_ONLY)

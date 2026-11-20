@@ -33,6 +33,16 @@ def _short(value, limit: int = 300):
     return s if len(s) <= limit else s[:limit] + f"... ({len(s)} chars)"
 
 
+# Observation kinds, so the logs show how often ROSE falls back to screenshots (see rose/metrics.py).
+KIND = {
+    **dict.fromkeys(("ui_list", "ui_read", "ui_click", "ui_fill", "browser_read", "browser_tabs", "browser_status",
+                     "browser_click", "browser_fill", "browser_press", "list_windows"), "tree"),
+    "take_screenshot": "screenshot",
+    **dict.fromkeys(("mouse_click", "scroll"), "coords"),
+    **dict.fromkeys(("type_text", "press_keys"), "keys"),
+}
+
+
 def logged(fn):
     """Log every call (args, outcome, duration) to ~/rose/logs/YYYY-MM-DD.jsonl."""
 
@@ -52,6 +62,7 @@ def logged(fn):
             "ts": datetime.now().isoformat(timespec="seconds"),
             "caller": who,
             "tool": fn.__name__,
+            **({"kind": KIND[fn.__name__]} if fn.__name__ in KIND else {}),
             "args": {k: _short(v) for k, v in bound.arguments.items()},
         }
         try:

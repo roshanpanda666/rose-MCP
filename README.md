@@ -10,10 +10,10 @@ Built with the official MCP Python SDK (`mcp` 2.x, where `FastMCP` is now called
 | Group | Tools |
 | --- | --- |
 | Clipboard | `clipboard_read`, `clipboard_write` (`xclip` on X11, `wl-clipboard` on Wayland) |
-| Screen | `take_screenshot` (full PNG saved to `~/rose/screenshots/`, plus a downscaled preview; `monitor=` crops to one screen), `list_monitors` |
+| Screen (fallback) | `take_screenshot` (full PNG saved to `~/rose/screenshots/`, plus a downscaled preview of the active window's monitor by default; `area=active_window\|monitor\|desktop`, `monitor=` picks one screen), `list_monitors` |
 | Notifications | `send_notification` |
 | Apps & windows | `list_apps`, `open_app` (installed desktop apps only, no arguments), `open_url` (http/https only), `list_windows`, `focus_window`, `close_window` (polite close, needs `confirm`) |
-| Mouse & keyboard | `mouse_click`, `scroll`, `type_text`, `press_keys`, `mouse_position` |
+| Mouse & keyboard | `mouse_click`, `scroll`, `type_text`, `press_keys` (both take an optional `window=` to focus-verify first), `mouse_position` |
 | Webcam | `list_cameras`, `webcam_capture` (saved to `~/rose/webcam/`; shows a desktop notification on every capture) |
 | GitHub (read-only) | `github_my_prs`, `github_pr_status`, `github_ci_runs`, `github_notifications` (uses `gh`) |
 | Files | `list_allowed_dirs`, `list_dir`, `read_file`, `write_file`, `move_file`, `search_files`, all limited to the allowlist |
@@ -22,7 +22,11 @@ Built with the official MCP Python SDK (`mcp` 2.x, where `FastMCP` is now called
 | Command presets | `list_commands` and `run_command(name)` run the fixed commands under `[commands]` in `config.toml`. There's no shell and no arguments. |
 | Quick settings | `quick_settings`, `set_quick_setting(setting, value)` for Wi-Fi, Bluetooth, Airplane mode, Power mode, Night Light, Dark Style, Do Not Disturb, Caffeine, volume, mute and brightness, plus `lock_screen`. Wi-Fi off and Airplane on need `confirm` and undo themselves automatically (default 2 min) through a systemd timer, because they cut ROSE's own connection. |
 
-Mouse coordinates default to pixels in the latest screenshot preview, and ROSE converts them to real screen pixels. So the normal loop is: focus the window, take a screenshot, click or type, then take another screenshot to check.
+ROSE is **tree-first**: observe through the accessibility tree (`ui_list`, `ui_read`) or the browser DOM (`browser_read`), act by name (`ui_click`, `ui_fill`, `browser_click`, `browser_fill`), then read back to confirm. Screenshots are the fallback for apps with no tree (canvas, games, remote desktops, video), for read-back failures the tree can't explain, and for visual questions. `observation_stats` reports tree calls vs screenshots per caller and per task (bursts of GUI calls), so you can watch the screenshot rate.
+
+Typing is focus-verified and read back. `type_text(window=...)` and `press_keys(window=...)` make that window active first and refuse to type if they can't. After typing, `type_text` checks through AT-SPI that the text is in the focused element. `ui_fill` and `browser_fill` read the field back, and every result says `Read-back OK` or `READ-BACK FAILED`.
+
+In the screenshot fallback, mouse coordinates default to pixels in the latest preview, and ROSE converts them to real screen pixels.
 
 Window and input tools support X11 only for now.
 
@@ -92,7 +96,7 @@ On ngrok's free plan, the browser shows a "You are about to visit…" page once 
 
 ## Accessibility and browser control
 
-- **`ui_list`, `ui_read`, `ui_click`, `ui_fill`** work through AT-SPI, via `rose/atspi_helper.py` running under the system Python. They read and operate an app's buttons and fields **by name**, with no screenshots. GNOME and GTK apps work out of the box. Chromium and Electron apps need `ui_enable_app_accessibility` and then an app restart.
+- **`ui_list`, `ui_read`, `ui_click`, `ui_fill`** work through AT-SPI, via `rose/atspi_helper.py` running under the system Python. They read and operate an app's buttons and fields **by name**, with no screenshots. `ui_list` shows the current value of text fields. `ui_read(window, element=...)` reads a single control (value, focused or checked) for read-back. GNOME and GTK apps work out of the box. Chromium and Electron apps need `ui_enable_app_accessibility` and then an app restart. When their tree comes back empty, `ui_list` says so in a `hint`.
 - **`browser_*`** control **ROSE's own browser**: Brave with a separate profile in `~/.config/rose-browser`, driven over DevTools on 127.0.0.1. Chromium refuses DevTools control of your main profile, and keeping ROSE's logins separate is safer anyway. Log in there once to the sites ROSE should use. There's deliberately no "run JavaScript" tool, and Enter needs `confirm`.
 - From remote clients, clicks, fills and key presses through `ui_*` and `browser_*` are approval-gated like the mouse (see the approval window below).
 

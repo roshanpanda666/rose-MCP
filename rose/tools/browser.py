@@ -56,6 +56,19 @@ FOCUS_FIELD = """
   return 'OK:' + lab(e).slice(0, 60);
 })()
 """
+# Read-back after browser_fill: does the focused field now contain the text? Returns only a verdict,
+# never the field's contents.
+CHECK_FIELD = """
+(() => {
+  const want = %s.split(/\\s+/).join(' ').trim();
+  const e = document.activeElement;
+  if (!e || e === document.body) return 'NOFOCUS';
+  const v = (e.isContentEditable ? e.innerText : (e.value !== undefined ? String(e.value) : e.innerText || '')) || '';
+  if (e.type === 'password') return 'SECRET';
+  return v.split(/\\s+/).join(' ').includes(want) ? 'OK' : 'MISMATCH:' + v.length;
+})()
+"""
+STATE = "(() => JSON.stringify({url: location.href, title: document.title}))()"
 READ = "(() => { const t = document.body ? document.body.innerText : ''; return JSON.stringify({title: document.title, url: location.href, text: t.slice(0, %d)}); })()"
 
 
@@ -164,6 +177,13 @@ def _eval(tab: dict, expr: str):
     return r.get("result", {}).get("value")
 
 
+def _state(tab: dict) -> dict | None:
+    try:
+        return json.loads(_eval(tab, STATE))
+    except Exception:
+        return None
+
+
 def browser_open(url: str, new_tab: bool = True) -> str:
     """Open a URL in ROSE's browser (starts it if needed)."""
     url = _check_url(url)
@@ -177,7 +197,8 @@ def browser_open(url: str, new_tab: bool = True) -> str:
 
 
 def browser_read(tab: str = "", max_chars: int = 8000) -> dict:
-    """Read a tab's visible text (title, url, text) without a screenshot."""
+    """PREFERRED way to see a web page (no screenshot): a tab's visible text (title, url, text).
+    Also use it to read back after browser_click / browser_fill."""
     t = _tab(tab)
     return json.loads(_eval(t, READ % max(500, min(max_chars, 50000))))
 
@@ -186,12 +207,17 @@ def browser_click(text: str, tab: str = "") -> str:
     """Click a button/link in a tab by its visible text or label (e.g. "Send", "Next"), or a CSS selector."""
     t = _tab(tab)
     found = FIND % (json.dumps(text), json.dumps(text))
+    before = _state(t)
     res = _eval(t, CLICK % found)
     if res == "NOTFOUND":
         raise ToolError(f"Nothing clickable labelled '{text}'. Use browser_read to see the page.")
     if res.startswith("MANY:"):
         raise ToolError(f"Several matches for '{text}': {res[5:]}. Be more specific.")
-    return f"Clicked {res[3:]!r} in {t.get('title', '')[:50]}."
+    time.sleep(0.4)
+    after = _state(t)
+    changed = ("the page navigated" if before and after and before.get("url") != after.get("url")
+               else "same page; browser_read to confirm the new state")
+    return f"Clicked {res[3:]!r} in {t.get('title', '')[:50]} ({changed})."
 
 
 def browser_fill(field: str, text: str, tab: str = "") -> str:
@@ -204,7 +230,19 @@ def browser_fill(field: str, text: str, tab: str = "") -> str:
     if res.startswith("NOTFOUND"):
         raise ToolError(f"No field matches '{field}'. Fields on the page: {res[9:][:200]}")
     _cdp(t, [("Input.insertText", {"text": text})])  # real typing events: works in React/WhatsApp editors
-    return f"Filled {res[3:]!r} with {len(text)} characters."
+    msg = f"Filled {res[3:]!r} with {len(text)} characters."
+    try:
+        chk = _eval(t, CHECK_FIELD % json.dumps(text))
+    except ToolError:
+        chk = None
+    if chk == "OK":
+        return msg + " Read-back OK: the field contains the text."
+    if chk == "SECRET":
+        return msg + " (password field: not read back)."
+    if chk is None:
+        return msg + " Read-back unavailable; check with browser_read."
+    return (msg + " READ-BACK FAILED: " + ("no field has focus now" if chk == "NOFOCUS" else
+            "the focused field doesn't contain the text") + ". Check with browser_read and retry.")
 
 
 def browser_press(key: str, tab: str = "", confirm: bool = False) -> str:
