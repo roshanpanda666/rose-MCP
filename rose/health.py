@@ -6,47 +6,35 @@ collect(probe_public=True) returns a dict; alerts are (level, title, detail) wit
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
-import subprocess
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime, timedelta
 
 import psutil
 
+from rose.common import http_status, systemctl_user
+from rose.common import probe_unauth as _probe
 from rose.config import LOG_DIR, ROSE_HOME, get_public_url, load_config
 
 SERVICES = ["rose", "rose-tunnel", "rose-remote"]
 
 
-def _code(url: str, method: str = "GET", data: bytes | None = None, headers: dict | None = None,
-          timeout: float = 6) -> int | None:
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception:
-        return None
-
-
 def probe_unauth(base: str) -> int | None:
     """HTTP status of an MCP request without credentials. 401 = auth enforced."""
-    return _code(f"{base}/mcp", "POST", b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
-                 {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+    return _probe(base, timeout=6)
 
 
 def service_states() -> dict[str, str]:
+    """systemd state of each ROSE service ('active', 'inactive', ...)."""
     if not shutil.which("systemctl"):
         return {}
-    out = {}
+    states = {}
     for s in SERVICES:
-        r = subprocess.run(["systemctl", "--user", "is-active", s], capture_output=True, text=True)
-        out[s] = r.stdout.strip() or "unknown"
-    return out
+        out = systemctl_user("is-active", s)
+        states[s] = out.splitlines()[0] if out else "unknown"
+    return states
 
 
 def _events(days: int = 2) -> list[dict]:
@@ -56,14 +44,13 @@ def _events(days: int = 2) -> list[dict]:
         p = LOG_DIR / f"{(datetime.now() - timedelta(days=i)):%Y-%m-%d}.jsonl"
         if p.exists():
             for line in p.read_text().splitlines():
-                try:
+                with contextlib.suppress(ValueError):
                     entries.append(json.loads(line))
-                except ValueError:
-                    pass
     return entries
 
 
 def collect(probe_public: bool = True) -> dict:
+    """Snapshot for the dashboard: services, URLs, auth, activity, system, approvals, alerts."""
     from rose import auth
     from rose.tools import bridge
 
@@ -71,7 +58,7 @@ def collect(probe_public: bool = True) -> dict:
     port = cfg["http_port"]
     snap: dict = {"time": datetime.now()}
     snap["services"] = service_states()
-    snap["local_up"] = _code(f"http://127.0.0.1:{port}/.well-known/oauth-authorization-server", timeout=3) == 200
+    snap["local_up"] = http_status(f"http://127.0.0.1:{port}/.well-known/oauth-authorization-server", timeout=3) == 200
     snap["port"] = port
     url = get_public_url()
     snap["public_url"] = f"{url}/mcp" if url else ""
@@ -150,6 +137,7 @@ def collect(probe_public: bool = True) -> dict:
 
 
 def alerts(s: dict) -> list[tuple[str, str, str]]:
+    """'Should I worry?' list of (level, title, detail), most severe first."""
     a: list[tuple[str, str, str]] = []
     code = s["public_probe"]
     if s["public_url"] and code is not None and 200 <= code < 400:

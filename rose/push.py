@@ -8,14 +8,14 @@ anything sent to a public ntfy server should be treated as readable by whoever k
 from __future__ import annotations
 
 import secrets
-import subprocess
 import threading
 
-from rose.common import _log, display_env
+from rose.common import _log, notify_desktop
 from rose.config import load_config, update_settings
 
 
 def settings() -> tuple[str, str]:
+    """(ntfy server, topic) from config."""
     cfg = load_config()
     return cfg.get("ntfy_server", "https://ntfy.sh").rstrip("/"), cfg.get("ntfy_topic", "")
 
@@ -24,11 +24,7 @@ def push(title: str, message: str = "", url: str | None = None, priority: str = 
          tags: str = "", desktop: bool = True) -> bool:
     """Send a phone push (if set up) and a desktop notification. Never raises; returns True if pushed."""
     if desktop:
-        try:
-            subprocess.run(["notify-send", "--app-name=ROSE", title, message[:200]], env=display_env(),
-                           capture_output=True, timeout=5)
-        except Exception:
-            pass
+        notify_desktop(title, message)
     server, topic = settings()
     if not topic or not load_config().get("push_enabled", True):
         return False
@@ -55,7 +51,7 @@ def push(title: str, message: str = "", url: str | None = None, priority: str = 
 
 
 def push_status() -> dict:
-    """Whether phone push notifications are set up, and how to subscribe."""
+    """Phone push status and how to subscribe."""
     server, topic = settings()
     if not topic:
         return {"enabled": False, "how": "Run `rose push setup` on the laptop, then subscribe in the ntfy app."}

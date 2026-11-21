@@ -55,8 +55,7 @@ def _parse(text: str) -> list[dict]:
 
 
 def bridge_read(last: int = 10, since: str = "", only_for_me: bool = False) -> dict:
-    """Read bridge messages: the latest `last` (max 100), or those after `since` ('YYYY-MM-DD HH:MM:SS').
-    only_for_me=true keeps messages addressed to you or to 'all'."""
+    """Bridge messages: last N (max 100) or after since ('YYYY-MM-DD HH:MM:SS'); only_for_me filters."""
     p = bridge_path()
     me = caller()
     entries = _parse(p.read_text()) if p.exists() else []
@@ -70,8 +69,7 @@ def bridge_read(last: int = 10, since: str = "", only_for_me: bool = False) -> d
 
 
 def bridge_post(message: str, to: str = "all") -> dict:
-    """Append a message to the bridge. `to` is 'all' or a participant name (e.g. 'Forge').
-    If the result contains `email_copy`, send it right away with your Gmail send tool."""
+    """Post to the bridge (to: 'all' or a name). If result has email_copy, send it with Gmail now."""
     from rose import mailer
 
     result: dict = {"posted": post_as(caller(), message, to, email=False)}

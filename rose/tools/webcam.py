@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from rose.common import ToolError, display_env, require, run
+from rose.common import ToolError, notify_desktop, require, run
 from rose.config import ROSE_HOME, load_config
 
 WEBCAM_DIR = ROSE_HOME / "webcam"
@@ -15,7 +13,7 @@ _V4L = Path("/sys/class/video4linux")
 
 
 def list_cameras() -> list[dict]:
-    """List webcams that can capture images (one entry per camera, not per metadata node)."""
+    """Webcams that can capture."""
     cams = []
     if not _V4L.is_dir():
         return cams
@@ -51,7 +49,5 @@ def webcam_capture(device: str = "") -> str:
         run(base + tail, timeout=20)  # camera doesn't do 720p; use its default size
     if not out.exists() or out.stat().st_size == 0:
         raise ToolError("ffmpeg ran but no image was written (is another app using the camera?).")
-    if shutil.which("notify-send"):
-        subprocess.run(["notify-send", "--app-name=ROSE", "--urgency=low", "ROSE used the webcam",
-                        f"{cams[device]} -> {out.name}"], env=display_env(), capture_output=True)
+    notify_desktop("ROSE used the webcam", f"{cams[device]} -> {out.name}", urgency="low")
     return str(out)

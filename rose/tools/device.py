@@ -9,19 +9,15 @@ import re
 import signal
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
-import psutil
-
-from rose.common import ToolError, display_env, run
+from rose.common import ToolError, display_env, run, run_text
 from rose.config import load_config
 
 MAX_OUTPUT = 8000
-
-
-def _out(cmd: list[str], timeout: float = 10) -> str:
-    return run(cmd, timeout=timeout).decode(errors="replace").strip()
+_out = run_text
 
 
 # ---------------- media (MPRIS over D-Bus, works with Spotify, browsers, VLC, ...) ----------------
@@ -48,9 +44,10 @@ def _player_info(p: str) -> dict:
 
 def media_control(action: Literal["status", "play_pause", "play", "pause", "next", "previous", "stop"] = "status",
                   player: str = "") -> dict | str:
-    """Control music/video playback (Spotify, YouTube in the browser, VLC, ...). Without `player`,
-    acts on the one that's playing (or the first one found)."""
-    players = [_player_info(p) for p in _players()]
+    """Media playback (Spotify, browser, VLC...): status/play/pause/next... Default: the playing player."""
+    buses = _players()
+    with ThreadPoolExecutor(max_workers=max(1, len(buses))) as pool:
+        players = list(pool.map(_player_info, buses))
     if not players:
         return "Nothing is playing and no media player is open."
     if action == "status":
@@ -83,12 +80,12 @@ def _wpctl_section(kind: str) -> list[dict]:
 
 
 def audio_devices() -> dict:
-    """Speakers/headphones (outputs) and microphones (inputs), with which is the default."""
+    """Audio outputs and inputs, with defaults."""
     return {"outputs": _wpctl_section("Sinks"), "inputs": _wpctl_section("Sources")}
 
 
 def set_audio_device(device: str, kind: Literal["output", "input"] = "output") -> str:
-    """Switch the default speaker/headphones (output) or microphone (input), by id or part of its name."""
+    """Set default output/input device by id or name part."""
     devs = _wpctl_section("Sinks" if kind == "output" else "Sources")
     d = device.strip().lower()
     hits = [x for x in devs if d == str(x["id"]) or d in x["name"].lower()]
@@ -100,7 +97,7 @@ def set_audio_device(device: str, kind: Literal["output", "input"] = "output") -
 
 
 def set_mic_muted(muted: bool) -> str:
-    """Mute or unmute the default microphone."""
+    """Mute/unmute the default mic."""
     run(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "1" if muted else "0"])
     return f"Microphone {'muted' if muted else 'unmuted'}."
 
@@ -113,19 +110,17 @@ def _bt(*args: str, timeout: float = 15) -> str:
 
 
 def bluetooth_devices() -> list[dict]:
-    """Paired Bluetooth devices (earbuds, speakers, ...) and whether each is connected."""
-    out = []
-    for line in _bt("devices", "Paired").splitlines():
-        m = re.match(r"Device ([0-9A-F:]{17}) (.+)", line.strip())
-        if m:
-            info = _bt("info", m.group(1))
-            out.append({"name": m.group(2), "address": m.group(1), "connected": "Connected: yes" in info})
-    return out
+    """Paired Bluetooth devices and connection state."""
+    devs = [m.groups() for line in _bt("devices", "Paired").splitlines()
+            if (m := re.match(r"Device ([0-9A-F:]{17}) (.+)", line.strip()))]
+    with ThreadPoolExecutor(max_workers=max(1, len(devs))) as pool:
+        infos = list(pool.map(lambda d: _bt("info", d[0]), devs))
+    return [{"name": name, "address": addr, "connected": "Connected: yes" in info}
+            for (addr, name), info in zip(devs, infos, strict=True)]
 
 
 def bluetooth_connect(device: str, connect: bool = True) -> str:
-    """Connect (or disconnect) a paired Bluetooth device by part of its name or its address.
-    Turns Bluetooth on first if needed."""
+    """Connect/disconnect a paired Bluetooth device (name part or address)."""
     devs = bluetooth_devices()
     d = device.strip().lower()
     hits = [x for x in devs if d == x["address"].lower() or d in x["name"].lower()]
@@ -148,7 +143,7 @@ def bluetooth_connect(device: str, connect: bool = True) -> str:
 # ---------------- Wi-Fi networks ----------------
 
 def wifi_networks() -> dict:
-    """Wi-Fi networks in range (strongest first) and saved networks ROSE can switch to."""
+    """Wi-Fi in range (strongest first) and saved networks."""
     visible = []
     for line in _out(["nmcli", "-t", "-f", "IN-USE,SIGNAL,SECURITY,SSID", "dev", "wifi", "list"]).splitlines():
         parts = line.split(":", 3)
@@ -161,10 +156,9 @@ def wifi_networks() -> dict:
 
 
 def wifi_connect(network: str, confirm: bool = False) -> str:
-    """Switch to a SAVED Wi-Fi network. Switching briefly drops the connection (and ROSE's remote access),
-    so it needs confirm=true; if the new network has no internet after 90s, ROSE switches back."""
+    """Switch to a saved Wi-Fi network. Needs confirm=true (drops ROSE's link; reverts after 90 s if offline)."""
     lines = _out(["nmcli", "-t", "-f", "NAME,UUID,TYPE,ACTIVE", "con", "show"]).splitlines()
-    saved = [dict(zip(("name", "uuid", "type", "active"), l.rsplit(":", 3))) for l in lines]
+    saved = [dict(zip(("name", "uuid", "type", "active"), line.rsplit(":", 3), strict=False)) for line in lines]
     saved = [s for s in saved if s.get("type") == "802-11-wireless"]
     hit = [s for s in saved if s["name"].lower() == network.strip().lower()] or \
           [s for s in saved if network.strip().lower() in s["name"].lower()]
@@ -200,7 +194,7 @@ def net_fallback(uuid: str) -> int:
 # ---------------- speech, files, processes ----------------
 
 def speak(text: str) -> str:
-    """Say something out loud on the laptop's speakers (text-to-speech)."""
+    """Speak text aloud (TTS)."""
     text = text.strip()
     if not text or len(text) > 500:
         raise ToolError("Text must be 1-500 characters.")
@@ -209,8 +203,7 @@ def speak(text: str) -> str:
 
 
 def open_path(path: str) -> str:
-    """Open a file or folder (inside the allowed folders) in its default app, e.g. a PDF or a folder
-    in the file manager."""
+    """Open an allowed file/folder in its default app."""
     from rose.tools.files import _resolve
     p = _resolve(path)
     if not p.exists():
@@ -225,8 +218,9 @@ PROTECTED = {"rose", "ngrok", "cloudflared", "systemd", "gnome-shell", "Xorg", "
 
 
 def stop_process(target: str, confirm: bool = False) -> str:
-    """Politely stop (SIGTERM) a process of yours by pid or name, e.g. a frozen app eating RAM.
-    Needs confirm=true. System processes, ROSE, its tunnel and Claude Code are protected."""
+    """SIGTERM one of your processes by pid or name. Needs confirm=true; system/ROSE/Claude protected."""
+    import psutil
+
     me = psutil.Process().username()
     t = target.strip()
     procs = [psutil.Process(int(t))] if t.isdigit() else \
@@ -256,14 +250,13 @@ def _presets() -> dict[str, list[str]]:
 
 
 def list_commands() -> dict:
-    """Command presets the user defined in ROSE's config ([commands] in config.toml)."""
+    """User command presets ([commands] in config.toml)."""
     return {name: " ".join(argv) for name, argv in _presets().items()} or \
         {"(none)": "Add presets under [commands] in ~/.config/rose/config.toml"}
 
 
 def run_command(name: str) -> dict:
-    """Run one of the user's command presets by name (see list_commands). Presets are fixed commands
-    from the config; nothing else can be run and no arguments are passed in."""
+    """Run a preset by name (fixed command, no arguments)."""
     presets = _presets()
     if name not in presets:
         raise ToolError(f"No preset '{name}'. Available: {list(presets) or 'none'}")
@@ -272,8 +265,8 @@ def run_command(name: str) -> dict:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=display_env(),
                            cwd=Path.home(), stdin=subprocess.DEVNULL)
     except FileNotFoundError:
-        raise ToolError(f"'{argv[0]}' isn't installed or not on PATH.")
+        raise ToolError(f"'{argv[0]}' isn't installed or not on PATH.") from None
     except subprocess.TimeoutExpired:
-        raise ToolError("The command took longer than 60s and was stopped.")
+        raise ToolError("The command took longer than 60s and was stopped.") from None
     out = (p.stdout + ("\n" + p.stderr if p.stderr.strip() else "")).strip()
     return {"exit_code": p.returncode, "output": out[-MAX_OUTPUT:] if len(out) > MAX_OUTPUT else out}

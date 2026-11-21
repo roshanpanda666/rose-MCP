@@ -12,10 +12,12 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from rose.common import ToolError, display_env, run
+from rose.common import ToolError, display_env, run, run_text
 
 RFKILL = ["org.gnome.SettingsDaemon.Rfkill", "/org/gnome/SettingsDaemon/Rfkill", "org.gnome.SettingsDaemon.Rfkill"]
 POWER = ["--dest", "org.gnome.SettingsDaemon.Power", "--object-path", "/org/gnome/SettingsDaemon/Power"]
@@ -31,7 +33,7 @@ Setting = Literal["wifi", "bluetooth", "airplane_mode", "power_mode", "night_lig
 
 
 def _out(cmd: list[str]) -> str:
-    return run(cmd, timeout=10).decode(errors="replace").strip()
+    return run_text(cmd, timeout=10)
 
 
 def _gset(schema: list[str] | str, key: str, value: str | None = None) -> str:
@@ -60,37 +62,65 @@ def _brightness(value: int | None = None) -> int | None:
     return value
 
 
-def _safe(fn, default=None):
+def _safe(fn: Callable[[], Any], default: Any = None) -> Any:
     try:
         return fn()
     except Exception:
         return default
 
 
+def _ssid() -> str | None:
+    rows = _out(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"]).splitlines()
+    return next((r.split(":", 1)[1] for r in rows if r.startswith("yes:")), None)
+
+
+def _bt_powered() -> bool:
+    out = subprocess.run(["bluetoothctl", "show"], capture_output=True, text=True, timeout=5, env=display_env())
+    return "Powered: yes" in out.stdout
+
+
+# name -> (probe, default when the probe fails). Each probe is one short subprocess, so they run in parallel.
+_PROBES: dict[str, tuple[Callable[[], Any], Any]] = {
+    "wifi": (lambda: _out(["nmcli", "radio", "wifi"]) == "enabled", None),
+    "ssid": (_ssid, None),
+    "volume": (lambda: _out(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"]), ""),
+    "bt_powered": (_bt_powered, None),
+    "bt_rfkill": (lambda: _busbool("BluetoothAirplaneMode"), True),
+    "airplane": (lambda: _busbool("AirplaneMode"), None),
+    "power": (lambda: _out(["powerprofilesctl", "get"]), None),
+    "night": (lambda: _gset("org.gnome.settings-daemon.plugins.color", "night-light-enabled") == "true", None),
+    "dark": (lambda: _gset("org.gnome.desktop.interface", "color-scheme") == "'prefer-dark'", None),
+    "dnd": (lambda: _gset("org.gnome.desktop.notifications", "show-banners") == "false", None),
+    "caffeine": (lambda: _gset(CAFFEINE, "user-enabled") == "true" if CAFFEINE_SCHEMAS.exists() else None, None),
+    "brightness": (_brightness, None),
+    "suspend": (lambda: _gset("org.gnome.settings-daemon.plugins.power", "sleep-inactive-ac-type") != "'nothing'",
+                None),
+    "timeout": (lambda: int(_gset("org.gnome.desktop.session", "idle-delay").split()[-1]) // 60, None),
+}
+
+
 def quick_settings() -> dict:
-    """Current state of the quick-settings menu (Wi-Fi, Bluetooth, Airplane mode, Power mode, ...)."""
-    ssid = _safe(lambda: next((l.split(":", 1)[1] for l in _out(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"])
-                               .splitlines() if l.startswith("yes:")), None))
-    vol = _safe(lambda: _out(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"]), "")
-    m = re.search(r"([\d.]+)", vol or "")
-    bt_powered = _safe(lambda: "Powered: yes" in subprocess.run(["bluetoothctl", "show"], capture_output=True,
-                                                                text=True, timeout=5, env=display_env()).stdout)
+    """Quick-settings state: Wi-Fi, Bluetooth, airplane, power mode, night light, volume..."""
+    with ThreadPoolExecutor(max_workers=len(_PROBES)) as pool:
+        futures = {k: pool.submit(_safe, fn, default) for k, (fn, default) in _PROBES.items()}
+        v = {k: f.result() for k, f in futures.items()}
+    vol = v["volume"] or ""
+    m = re.search(r"([\d.]+)", vol)
     return {
-        "wifi": _safe(lambda: _out(["nmcli", "radio", "wifi"]) == "enabled"),
-        "wifi_network": ssid,
-        "bluetooth": bool(bt_powered) and not _safe(lambda: _busbool("BluetoothAirplaneMode"), True),
-        "airplane_mode": _safe(lambda: _busbool("AirplaneMode")),
-        "power_mode": _safe(lambda: _out(["powerprofilesctl", "get"])),
-        "night_light": _safe(lambda: _gset("org.gnome.settings-daemon.plugins.color", "night-light-enabled") == "true"),
-        "dark_style": _safe(lambda: _gset("org.gnome.desktop.interface", "color-scheme") == "'prefer-dark'"),
-        "do_not_disturb": _safe(lambda: _gset("org.gnome.desktop.notifications", "show-banners") == "false"),
-        "caffeine": _safe(lambda: _gset(CAFFEINE, "user-enabled") == "true") if CAFFEINE_SCHEMAS.exists() else None,
+        "wifi": v["wifi"],
+        "wifi_network": v["ssid"],
+        "bluetooth": bool(v["bt_powered"]) and not v["bt_rfkill"],
+        "airplane_mode": v["airplane"],
+        "power_mode": v["power"],
+        "night_light": v["night"],
+        "dark_style": v["dark"],
+        "do_not_disturb": v["dnd"],
+        "caffeine": v["caffeine"],
         "volume_percent": round(float(m.group(1)) * 100) if m else None,
-        "muted": "MUTED" in (vol or ""),
-        "brightness_percent": _safe(_brightness),
-        "auto_suspend_on_ac": _safe(lambda: _gset("org.gnome.settings-daemon.plugins.power",
-                                                  "sleep-inactive-ac-type") != "'nothing'"),
-        "screen_timeout_minutes": _safe(lambda: int(_gset("org.gnome.desktop.session", "idle-delay").split()[-1]) // 60),
+        "muted": "MUTED" in vol,
+        "brightness_percent": v["brightness"],
+        "auto_suspend_on_ac": v["suspend"],
+        "screen_timeout_minutes": v["timeout"],
     }
 
 
@@ -125,10 +155,8 @@ def _network_cut(name: str, cut: list[str], restore: list[str], confirm: bool, u
 
 
 def set_quick_setting(setting: Setting, value: str, confirm: bool = False, undo_after: int = DEFAULT_UNDO) -> str:
-    """Change one quick setting. value: on/off for toggles; power-saver/balanced/performance for
-    power_mode; 0-100 for volume and brightness; minutes (0 = never) for screen_timeout;
-    auto_suspend on/off = whether the laptop sleeps when idle on AC power (asleep = ROSE unreachable). Wi-Fi off and Airplane mode on cut ROSE's own
-    connection: they need confirm=true and are undone automatically after undo_after seconds."""
+    """Change a quick setting. value: on/off; power_mode power-saver|balanced|performance; volume/brightness
+    0-100; screen_timeout minutes (0=never). Wi-Fi off / airplane on cut ROSE's link: confirm=true, auto-undone."""
     if setting == "wifi":
         if _bool(value):
             run(["nmcli", "radio", "wifi", "on"])
@@ -182,7 +210,7 @@ def set_quick_setting(setting: Setting, value: str, confirm: bool = False, undo_
         try:
             minutes = int(float(str(value).strip().lower().replace("never", "0").rstrip("m")))
         except ValueError:
-            raise ToolError("screen_timeout needs minutes (0 = never).")
+            raise ToolError("screen_timeout needs minutes (0 = never).") from None
         minutes = max(0, min(minutes, 120))
         _gset("org.gnome.desktop.session", "idle-delay", f"uint32 {minutes * 60}")
         return f"Screen turns off after {minutes} min." if minutes else "Screen never turns off by itself."
@@ -194,7 +222,7 @@ def set_quick_setting(setting: Setting, value: str, confirm: bool = False, undo_
         try:
             pct = int(float(str(value).strip().rstrip("%")))
         except ValueError:
-            raise ToolError(f"{setting} needs a number 0-100.")
+            raise ToolError(f"{setting} needs a number 0-100.") from None
         if setting == "volume":
             pct = max(0, min(pct, 100))
             run(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{pct}%"])
@@ -206,7 +234,7 @@ def set_quick_setting(setting: Setting, value: str, confirm: bool = False, undo_
 
 
 def lock_screen() -> str:
-    """Lock the screen (ROSE keeps running; screenshots will show the lock screen)."""
+    """Lock the screen."""
     run(["gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver", "--object-path", "/org/gnome/ScreenSaver",
          "--method", "org.gnome.ScreenSaver.SetActive", "true"])
     return "Screen locked."

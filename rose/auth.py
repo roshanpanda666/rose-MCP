@@ -28,7 +28,6 @@ import secrets
 import sys
 import threading
 import time
-from pathlib import Path
 from urllib.parse import urlparse
 
 from mcp.server.auth.provider import (

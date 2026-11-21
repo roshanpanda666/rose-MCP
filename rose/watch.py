@@ -15,8 +15,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Literal
 
-import psutil
-
 from rose.common import ToolError, _log
 from rose.config import LOG_DIR, ROSE_HOME, load_config
 from rose.push import push
@@ -74,11 +72,8 @@ def _next_run(item: dict, after: datetime) -> datetime | None:
 def schedule_add(kind: Literal["remind", "report", "forge"], time_hhmm: str, text: str = "",
                  repeat: Literal["once", "daily", "weekdays", "weekly"] = "once", date: str = "",
                  weekday: str = "", confirm: bool = False) -> dict:
-    """Schedule something. kind: remind (push `text` to the phone), report (system + GitHub summary,
-    full text on the bridge), forge (run `text` as a Forge task; result on the bridge; it can only read
-    and draft). time_hhmm is 24h local time like "18:00"; date "YYYY-MM-DD" for one-offs (default:
-    next occurrence); repeat once/daily/weekdays/weekly (+ weekday mon..sun). Scheduled Forge tasks
-    need confirm=true."""
+    """Schedule: remind (push text to phone), report (system+GitHub summary to bridge), forge (run text as a
+    Forge task; needs confirm=true). time_hhmm "18:00"; date YYYY-MM-DD; repeat once|daily|weekdays|weekly."""
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", time_hhmm.strip()):
         raise ToolError("time_hhmm must be 24-hour HH:MM, e.g. 09:00 or 18:30.")
     if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -236,6 +231,8 @@ def _tick_security(state: dict) -> None:
 
 
 def _tick_system(state: dict) -> None:
+    import psutil  # lazy: only the watcher process needs it
+
     cfg = load_config()
     disk = psutil.disk_usage("/").percent
     if disk >= cfg.get("alert_disk_percent", 90) and _cooldown(state, "disk", 86400):

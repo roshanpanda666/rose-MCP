@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
-
-import psutil
+from typing import Any
 
 POWER_SUPPLY = Path("/sys/class/power_supply")
+MIN_SAMPLE = 0.5  # seconds of CPU sampling behind every percentage
+
+# psutil measures CPU% between two reads of the same Process object. Keeping the objects between calls
+# means the counters are already primed, so only the first call (or one within MIN_SAMPLE of the last)
+# has to sleep. Percentages then cover the time since the previous call (at least MIN_SAMPLE).
+_lock = threading.Lock()
+_procs: dict[int, Any] = {}  # pid -> psutil.Process
+_last_sample = 0.0
 
 
 def _sysfs(path: Path) -> str | None:
@@ -18,6 +26,8 @@ def _sysfs(path: Path) -> str | None:
 
 
 def _battery() -> dict | None:
+    import psutil
+
     battery = psutil.sensors_battery()
     if battery is None:
         return None
@@ -45,36 +55,61 @@ def _gb(n: int) -> float:
     return round(n / 1024**3, 1)
 
 
+def _sample() -> tuple[float, list[dict]]:
+    """(total CPU %, per-process rows) over at least MIN_SAMPLE seconds."""
+    global _last_sample
+    import psutil  # lazy: keeps ROSE's startup light
+
+    with _lock:
+        current, fresh = {}, set()
+        for p in psutil.process_iter(["pid", "name", "memory_percent"]):
+            proc = _procs.get(p.pid)
+            if proc is None or not proc.is_running():
+                proc = p
+                try:
+                    proc.cpu_percent(None)  # prime a newcomer
+                except psutil.Error:
+                    continue
+                fresh.add(p.pid)
+            proc.info = p.info  # fresh name / memory for this call
+            current[p.pid] = proc
+        _procs.clear()
+        _procs.update(current)
+        if _last_sample == 0.0:  # first call: nothing primed yet
+            psutil.cpu_percent(None)
+            wait = MIN_SAMPLE
+        else:
+            wait = MIN_SAMPLE - (time.monotonic() - _last_sample)
+        if wait > 0:
+            time.sleep(wait)
+        cpu_total = psutil.cpu_percent(None)
+        _last_sample = time.monotonic()
+        rows = []
+        now = time.time()
+        for pid, proc in current.items():
+            try:
+                cpu = proc.cpu_percent(None)
+                if pid in fresh and wait <= 0:
+                    # primed just now, so its own sample is too short: use its average since it started
+                    t = proc.cpu_times()
+                    cpu = 100 * (t.user + t.system) / max(MIN_SAMPLE, now - proc.create_time())
+                rows.append({"pid": proc.info["pid"], "name": proc.info["name"],
+                             "cpu_percent": round(cpu, 1),
+                             "memory_percent": round(proc.info["memory_percent"] or 0, 1)})
+            except psutil.Error:
+                continue
+    return cpu_total, rows
+
+
 def system_status(top_n: int = 5) -> dict:
-    """CPU, memory, disk, battery and the top processes by CPU and memory."""
+    """CPU, memory, disk, battery, uptime and top processes."""
+    import psutil
+
     top_n = max(1, min(top_n, 20))
-
-    # Prime per-process CPU counters, wait briefly, then read real percentages.
-    procs = list(psutil.process_iter(["pid", "name", "username", "memory_percent"]))
-    for p in procs:
-        try:
-            p.cpu_percent(None)
-        except psutil.Error:
-            pass
-    cpu_total = psutil.cpu_percent(interval=0.5)
-    rows = []
-    for p in procs:
-        try:
-            rows.append(
-                {
-                    "pid": p.info["pid"],
-                    "name": p.info["name"],
-                    "cpu_percent": round(p.cpu_percent(None), 1),
-                    "memory_percent": round(p.info["memory_percent"] or 0, 1),
-                }
-            )
-        except psutil.Error:
-            continue
-
+    cpu_total, rows = _sample()
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
     load1, load5, load15 = psutil.getloadavg()
-
     return {
         "cpu": {
             "percent": cpu_total,

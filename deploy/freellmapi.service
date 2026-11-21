@@ -1,0 +1,16 @@
+# FreeLLMAPI: OpenAI-compatible router over free LLM tiers, with an MCP endpoint at /mcp.
+# Bound to 127.0.0.1 only (HOST in .env); reached remotely only through ROSE's authenticated connector.
+[Unit]
+Description=FreeLLMAPI router (127.0.0.1:3001, MCP at /mcp)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/0x/projects/freellmapi/server
+ExecStart=%h/.nvm/versions/node/v24.15.0/bin/node dist/index.js
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

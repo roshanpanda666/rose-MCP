@@ -15,6 +15,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+from rose.common import http_status as _code
+from rose.common import notify_desktop, probe_unauth, systemctl_user
 from rose.config import LOG_DIR, ROSE_HOME, get_public_url, load_config, set_public_url
 
 NGROK_CONFIGS = [Path.home() / ".config/ngrok/ngrok.yml", Path.home() / ".ngrok2/ngrok.yml"]
@@ -22,14 +24,17 @@ DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-
 
 
 def provider() -> str:
+    """Configured tunnel provider: 'ngrok' or 'cloudflare'."""
     return load_config().get("tunnel_provider", "cloudflare")
 
 
 def is_permanent() -> bool:
+    """True when the public URL survives restarts (ngrok static domain)."""
     return provider() == "ngrok"
 
 
 def ngrok_has_authtoken() -> bool:
+    """Whether an ngrok config file holds an authtoken."""
     for p in NGROK_CONFIGS:
         try:
             if re.search(r"^\s*authtoken:\s*\S+", p.read_text(), re.MULTILINE):
@@ -54,23 +59,6 @@ def readiness() -> list[tuple[str, bool, str]]:
     else:
         steps += [("cloudflared installed", bool(shutil.which("cloudflared")), "sudo apt install cloudflared")]
     return steps
-
-
-def _code(url: str, method="GET", data=None, headers=None, timeout=10):
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception:
-        return None
-
-
-def probe_unauth(base: str):
-    return _code(f"{base}/mcp", "POST", b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
-                 {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
-                  "User-Agent": "rose-safety-check"})
 
 
 def _start_cloudflare(port: int, log) -> tuple[subprocess.Popen, str]:
@@ -116,7 +104,7 @@ def _start_ngrok(port: int, log) -> tuple[subprocess.Popen, str]:
 def run() -> int:
     """Start the tunnel, point ROSE at it, verify auth, then stay up until the tunnel exits."""
     from rose import auth
-    from rose.cli import SERVICE, _notify, _systemctl
+    from rose.cli import SERVICE
 
     if not auth.auth_configured():
         print("Refusing: ROSE auth is not configured. Run: rose auth set-passphrase", file=sys.stderr)
@@ -144,8 +132,8 @@ def run() -> int:
     # The server uses the public URL as its OAuth issuer; restart it only if the URL changed.
     if get_public_url() != url:
         set_public_url(url)
-        if _systemctl("is-active", SERVICE) == "active":
-            _systemctl("restart", SERVICE)
+        if systemctl_user("is-active", SERVICE) == "active":
+            systemctl_user("restart", SERVICE)
     for _ in range(40):
         if _code(f"http://127.0.0.1:{port}/.well-known/oauth-authorization-server", timeout=2) == 200:
             break
@@ -166,7 +154,7 @@ def run() -> int:
     (ROSE_HOME / "public_url.txt").write_text(f"{url}/mcp\n")
     note = "permanent URL" if is_permanent() else "new URL: update it in Claude → Connectors"
     print(f"ROSE is live (auth enforced, {note}): {url}/mcp", flush=True)
-    _notify("ROSE remote access is live", f"{url}/mcp ({note})")
+    notify_desktop("ROSE remote access is live", f"{url}/mcp ({note})")
     rc = proc.wait()
     print(f"Tunnel exited ({rc}).", file=sys.stderr)
     return 1

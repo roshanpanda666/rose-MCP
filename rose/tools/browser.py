@@ -197,14 +197,13 @@ def browser_open(url: str, new_tab: bool = True) -> str:
 
 
 def browser_read(tab: str = "", max_chars: int = 8000) -> dict:
-    """PREFERRED way to see a web page (no screenshot): a tab's visible text (title, url, text).
-    Also use it to read back after browser_click / browser_fill."""
+    """PREFERRED way to see a web page: tab title, url, visible text. Use to read back."""
     t = _tab(tab)
     return json.loads(_eval(t, READ % max(500, min(max_chars, 50000))))
 
 
 def browser_click(text: str, tab: str = "") -> str:
-    """Click a button/link in a tab by its visible text or label (e.g. "Send", "Next"), or a CSS selector."""
+    """Click by visible text/label or CSS selector."""
     t = _tab(tab)
     found = FIND % (json.dumps(text), json.dumps(text))
     before = _state(t)
@@ -221,8 +220,7 @@ def browser_click(text: str, tab: str = "") -> str:
 
 
 def browser_fill(field: str, text: str, tab: str = "") -> str:
-    """Type text into a field found by label/placeholder/name (e.g. "Search", "Type a message"), or the
-    focused field if `field` is empty. Replaces its contents; doesn't submit."""
+    """Replace a field's text (by label/placeholder/name; empty = focused field). No submit. Reads back."""
     if len(text) > 10000:
         raise ToolError("Text too long.")
     t = _tab(tab)
@@ -246,7 +244,7 @@ def browser_fill(field: str, text: str, tab: str = "") -> str:
 
 
 def browser_press(key: str, tab: str = "", confirm: bool = False) -> str:
-    """Press a key in a tab: Enter, Tab, Escape, ArrowDown, ArrowUp. Enter may send/submit: needs confirm=true."""
+    """Press Enter/Tab/Escape/ArrowDown/ArrowUp in a tab. Enter needs confirm=true."""
     keys = {"enter": ("Enter", 13, "\r"), "tab": ("Tab", 9, ""), "escape": ("Escape", 27, ""),
             "arrowdown": ("ArrowDown", 40, ""), "arrowup": ("ArrowUp", 38, "")}
     k = keys.get(key.lower())

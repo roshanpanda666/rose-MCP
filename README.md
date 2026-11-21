@@ -12,15 +12,16 @@ Built with the official MCP Python SDK (`mcp` 2.x, where `FastMCP` is now called
 | Clipboard | `clipboard_read`, `clipboard_write` (`xclip` on X11, `wl-clipboard` on Wayland) |
 | Screen (fallback) | `take_screenshot` (full PNG saved to `~/rose/screenshots/`, plus a downscaled preview of the active window's monitor by default; `area=active_window\|monitor\|desktop`, `monitor=` picks one screen), `list_monitors` |
 | Notifications | `send_notification` |
-| Apps & windows | `list_apps`, `open_app` (installed desktop apps only, no arguments), `open_url` (http/https only), `list_windows`, `focus_window`, `close_window` (polite close, needs `confirm`) |
+| Apps & windows | `list_apps`, `open_app` (installed desktop apps only, no arguments), `open_url` (http/https only), `list_windows`, `focus_window`, `move_window` (to another monitor or x/y, keeps or sets maximized), `close_window` (polite close, needs `confirm`) |
 | Mouse & keyboard | `mouse_click`, `scroll`, `type_text`, `press_keys` (both take an optional `window=` to focus-verify first), `mouse_position` |
 | Webcam | `list_cameras`, `webcam_capture` (saved to `~/rose/webcam/`; shows a desktop notification on every capture) |
 | GitHub (read-only) | `github_my_prs`, `github_pr_status`, `github_ci_runs`, `github_notifications` (uses `gh`) |
-| Files | `list_allowed_dirs`, `list_dir`, `read_file`, `write_file`, `move_file`, `search_files`, all limited to the allowlist |
+| Files | `list_allowed_dirs`, `list_dir`, `read_file` (`offset=` pages past the output cap), `write_file`, `move_file`, `search_files`, all limited to the allowlist |
 | System | `system_status` (CPU, RAM, disk, battery, top processes) |
 | Device (by command) | `media_control` (play, pause, next and so on, for any MPRIS player), `audio_devices`, `set_audio_device`, `set_mic_muted`, `bluetooth_devices`, `bluetooth_connect`, `wifi_networks`, `wifi_connect` (saved networks only; needs `confirm`; switches back if there's no internet after 90 s), `speak`, `open_path`, `stop_process` (SIGTERM; needs `confirm`; protected processes are refused) |
 | Command presets | `list_commands` and `run_command(name)` run the fixed commands under `[commands]` in `config.toml`. There's no shell and no arguments. |
 | Quick settings | `quick_settings`, `set_quick_setting(setting, value)` for Wi-Fi, Bluetooth, Airplane mode, Power mode, Night Light, Dark Style, Do Not Disturb, Caffeine, volume, mute and brightness, plus `lock_screen`. Wi-Fi off and Airplane on need `confirm` and undo themselves automatically (default 2 min) through a systemd timer, because they cut ROSE's own connection. |
+| FreeLLMAPI | `freellm_ask`, `freellm_web_search`, `freellm_info(kind)` (health, models, providers, usage, quota, routing, cache), `freellm_set_routing`, `freellm_clear_cache` (needs `confirm`). They forward to the local FreeLLMAPI router on `127.0.0.1:3001`, which stays off the internet; see below. |
 
 ROSE is **tree-first**: observe through the accessibility tree (`ui_list`, `ui_read`) or the browser DOM (`browser_read`), act by name (`ui_click`, `ui_fill`, `browser_click`, `browser_fill`), then read back to confirm. Screenshots are the fallback for apps with no tree (canvas, games, remote desktops, video), for read-back failures the tree can't explain, and for visual questions. `observation_stats` reports tree calls vs screenshots per caller and per task (bursts of GUI calls), so you can watch the screenshot rate.
 
@@ -67,7 +68,7 @@ claude mcp add --scope user --transport http rose http://127.0.0.1:8765/mcp \
 
 Localhost still needs a token: tunnel traffic also arrives from 127.0.0.1, so ROSE can't trust localhost.
 
-`scripts/rose-remote.sh` and `deploy/rose-remote.service` are the v2 setup. Replace them with the two units above.
+The v2 `rose-remote` setup (script and unit) has been removed. `rose install-services` disables an old `rose-remote` unit if it is still installed.
 
 ## Remote access with ngrok (permanent URL)
 
@@ -180,18 +181,11 @@ claude mcp add -s user rose -- uv --directory /home/roshan/0x/projects/rose-MCP 
    uv run python -m rose.auth list
    uv run python -m rose.auth revoke <name | client_id | all>
    ```
-2. Set `public_url` in `~/rose/config.json` to your tunnel's https URL.
-3. Run `uv run rose/server.py --http`. It listens on `127.0.0.1:8765` only, so the tunnel is the only way in.
-4. Point the tunnel at `http://127.0.0.1:8765`, then add `<public_url>/mcp` as a custom connector in Claude.
+2. Run `rose serve` (or the `rose` service). It listens on `127.0.0.1:8765` only, so the tunnel is the only way in.
+3. Run `rose tunnel` (or the `rose-tunnel` service): ngrok static domain, or a Cloudflare quick tunnel whose URL changes on every restart. It records the public URL in `~/rose/runtime.json` and `~/rose/public_url.txt`.
+4. Add `<public_url>/mcp` as a custom connector in Claude.
 
-Quick start with a Cloudflare quick tunnel (no account; the URL changes on every restart):
-
-```sh
-scripts/rose-remote.sh     # or: install deploy/rose-remote.service as a systemd user service
-cat ~/rose/public_url.txt  # connector URL
-```
-
-The script refuses to start without auth. It shuts everything down unless the public URL answers 401 to an unauthenticated request. It also shows the connector URL as a desktop notification.
+`rose tunnel` refuses to start without auth. It shuts the tunnel down unless the public URL answers 401 to an unauthenticated request. `scripts/mcp_probe.py <base-url> [token]` runs a 22-check conformance test (discovery, 401 challenge, client registration, PKCE, session lifecycle, Origin check); it registers a `rose-probe` client, so revoke that afterwards.
 
 How auth works:
 
@@ -222,11 +216,11 @@ The sender name is not something the model chooses. ROSE sets it from the login:
 - **Failures:** they show up as a warning in the dashboard.
 - **Turning it off:** set `bridge_email_enabled = false`, or run `rose email off`.
 
-After changing code, run `scripts/rose-reload.sh`. It restarts only the HTTP server, so the tunnel and its URL stay the same.
+After changing code, run `uv tool install --force --python /usr/bin/python3 . && rose reload`. That restarts only the HTTP server, so the tunnel and its URL stay the same.
 
 ## Configuration and safety
 
-`~/rose/config.json` is created with defaults on first run. Set `ROSE_HOME` to use a different folder.
+`~/.config/rose/config.toml` is created with commented defaults on first run (`ROSE_CONFIG` overrides the path; `ROSE_HOME` moves the data folder). It's re-read whenever the file changes, so edits apply without a restart (except the port). The main keys:
 
 | Key | Meaning |
 | --- | --- |
@@ -234,8 +228,11 @@ After changing code, run `scripts/rose-reload.sh`. It restarts only the HTTP ser
 | `max_read_bytes` | Size limit for `read_file` and content search |
 | `input_enabled` | Set `false` to turn off mouse and keyboard control |
 | `webcam_device` | Default camera, e.g. `/dev/video0` |
-| `http_port`, `public_url` | HTTP mode settings |
+| `http_port` | Port for `rose serve` (always on 127.0.0.1); the public URL lives in `~/rose/runtime.json` |
 | `oauth_redirect_hosts` | Hosts OAuth clients may redirect back to |
+| `max_output_chars` | Cap on the text one tool call returns to the model (default 12000; 0 = no cap) |
+| `large_output_chars` | Outputs bigger than this are logged for `rose tokens` (default 4000) |
+| `disabled_tools` | Tools ROSE doesn't offer at all, e.g. `["webcam_capture", "lock_screen"]` |
 
 Rules:
 
@@ -244,19 +241,86 @@ Rules:
 - **No shell.** There is no delete tool and no shell-execution tool. `open_app` only launches installed `.desktop` apps.
 - **Logging.** Every tool call is logged to `~/rose/logs/YYYY-MM-DD.jsonl`.
 
+## Token budget
+
+ROSE's tool list is sent to the model every session, and every tool result lands in its context. So:
+
+- **Short descriptions.** Each tool's docstring is its description: one line, about 200 characters at most. Safety requirements (`confirm=true`, "ask the user") always stay in.
+- **Compact schemas.** Pydantic's auto `title` keys are stripped and optional types are written as `"type": ["integer", "null"]`. Property names are never changed.
+- **Stable order.** Tools register from one fixed table (`_tool_table()` in `rose/server.py`), so the tool list is byte-identical between sessions and clients can prompt-cache it. Append new tools; don't reorder.
+- **Compact output** (`rose/output.py`, applied to every tool after the guard):
+  - Dicts and lists become one-line JSON instead of the SDK's indented pretty-print.
+  - Empty fields (`None`, `""`, `[]`, `{}`) are dropped; `False` and `0` stay.
+  - Trailing spaces and blank-line runs are trimmed, except where text is payload: `read_file`, `clipboard_read`, `run_command`, `bridge_read`.
+  - Text is capped at `max_output_chars` with a note saying how much was cut (`read_file` pages with `offset=`).
+- **Fewer tools.** Rarely used diagnostics are merged: FreeLLMAPI's nine read-only tools are now one `freellm_info(kind)`. Drop more with `disabled_tools`.
+- **Find heavy tools.** Outputs over `large_output_chars` go to `~/rose/logs/output-YYYY-MM-DD.jsonl`.
+  - `rose tokens` ranks the tools by output tokens.
+  - `rose tokens --schema` shows how big the tool list is (currently about 5.5k tokens for 78 tools, including the instructions).
+
+Untrusted-content labels and injection warnings are never trimmed.
+
+## FreeLLMAPI bridge
+
+The `freellm_*` tools forward to [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi), a local router over free LLM tiers. It runs as its own service (`freellmapi.service`, `127.0.0.1:3001`, unit in `deploy/`).
+
+- **Off the internet.** It only does static-key auth, so it is never exposed: remote clients reach it through ROSE's OAuth-protected tunnel.
+- **Separate settings.** Its URL is `FREELLMAPI_URL` (default `http://127.0.0.1:3001`). Its key is in `~/.config/freellmapi-bridge/unified.key` (set with `rose freellm set-key`). `FREELLMAPI_DISABLED=1` turns the tools off.
+- **Check it** with `rose freellm status`.
+
+## Tests
+
+```sh
+uv run pytest -q
+```
+
+The suite runs in a throwaway `ROSE_HOME` and never touches `~/rose`, the live server, or the desktop. It covers:
+- the file allowlist and confirm rules;
+- config caching;
+- OAuth tokens and refresh rotation;
+- the guard: tripwire, untrusted labels, lockdown, remote approvals and grants, rate limit;
+- bridge sanitizing;
+- the Enter and network-cut confirm guards;
+- the FreeLLMAPI bridge (mocked);
+- screenshot coordinate mapping;
+- output shaping and schema compaction;
+- the HTTP transport end to end: 401 without a token, session with a token, foreign Origin refused, stable tool order.
+
+`rose selftest [--full]` still exercises every tool against the running server on the real desktop.
+
+## Performance notes
+
+- **`take_screenshot`** grabs the X screen in-process through XCB, about 60 ms instead of about 1.3 s for `maim`. The PNG save, the preview and the OCR then run in parallel. Windows are listed once and `xrandr` is cached for 10 s.
+  - Totals: about 1.3 s with OCR (was about 3.2 s), about 0.2 s with `include_text=false`.
+  - Full-resolution PNGs use fast compression, so they are about 30% bigger on disk.
+- **`system_status`** keeps psutil's per-process counters between calls, so it only waits for the 0.5 s CPU sample on the first call: about 40 ms afterwards (was about 550 ms).
+- **`quick_settings`, `bluetooth_devices`, `media_control` and `github_my_prs`** run their independent subprocess or network calls in parallel.
+- **`list_apps` and `open_app`** cache the parsed `.desktop` files until an applications folder changes.
+- **`focus_window`** polls for the focus change instead of always sleeping 0.3 s.
+- **Config** is parsed once and re-read only when the file changes. `psutil` and `httpx` load lazily.
+
 ## Adding a tool
 
-1. Write a plain function in `rose/tools/<name>.py`. Give it type hints and a docstring: the SDK builds the tool's schema from the hints and its description from the docstring. For expected failures, raise `rose.common.ToolError("message")`, and the message is passed to Claude. Any other exception shows up to Claude only as "Error executing tool".
-2. Register it in `register_tools()` in `rose/server.py` with `READ_ONLY`, `WRITES` or `DESTRUCTIVE`.
-3. Test the function directly, then reconnect `rose` from `/mcp` in Claude Code.
+1. Write a plain function in `rose/tools/<name>.py` with type hints and a one-line docstring. The SDK builds the schema from the hints, and the docstring becomes the description, so keep it short and mention `confirm=true` if the tool needs it. For expected failures, raise `rose.common.ToolError("message")` (use `from None` inside `except`). That message reaches Claude; any other exception shows up only as "Error executing tool".
+2. Append it to `_tool_table()` in `rose/server.py` with `READ_ONLY`, `WRITES` or `DESTRUCTIVE` (or the `OPEN_*` variants for tools that reach the internet). If its output carries outside text, add it to `UNTRUSTED_TOOLS` in `rose/guard.py`.
+3. Add a test in `tests/`, run `uv run pytest -q`, then `rose reload`.
 
 ## Layout
 
 ```
 rose/
-  server.py   # tool registration, stdio and HTTP entry points, login routes
-  auth.py     # OAuth provider, tokens, passphrase, login page, admin CLI
-  config.py   # paths and settings (~/rose/config.json)
-  common.py   # ToolError, call logging, X11/Wayland detection, subprocess helper
-  tools/      # clipboard, screenshot, notify, apps, input, webcam, github, files, system
+  server.py    # tool table + registration, stdio/HTTP entry points, login and approval routes
+  output.py    # compact tool output, size cap, large-output log (rose tokens)
+  guard.py     # lockdown, rate limit, approvals and grants, untrusted labels, injection tripwire
+  auth.py      # OAuth provider, tokens, passphrase, login/approval pages, admin CLI
+  config.py    # config.toml (cached), runtime.json, paths
+  common.py    # ToolError, call logging, subprocess/HTTP/systemd/notification helpers
+  cli.py       # the `rose` command
+  tunnel.py    # ngrok / Cloudflare tunnel, fail-closed
+  health.py, gui.py, watch.py, push.py, mailer.py, maintenance.py, metrics.py, selftest.py
+  tools/       # apps, browser, bridge, clipboard, device, files, forge, freellm, github, input, notify,
+               # quick, screenshot, system, ui, webcam
+tests/         # pytest suite (uv run pytest -q)
+scripts/       # mcp_probe.py: remote conformance probe
+deploy/        # systemd user units
 ```

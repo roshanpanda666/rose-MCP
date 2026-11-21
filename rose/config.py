@@ -11,10 +11,13 @@ Settings are re-read on every call, so edits apply without a restart (except por
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
 import tomllib
 from pathlib import Path
+from typing import Any
 
 ROSE_HOME = Path(os.environ.get("ROSE_HOME", Path.home() / "rose")).expanduser()
 CONFIG_PATH = Path(os.environ.get("ROSE_CONFIG", Path.home() / ".config" / "rose" / "config.toml")).expanduser()
@@ -53,6 +56,9 @@ DEFAULT_CONFIG = {
     "alert_battery_percent": 15,
     "keep_screenshots_days": 7,
     "keep_logs_days": 30,
+    "max_output_chars": 12000,
+    "large_output_chars": 4000,
+    "disabled_tools": [],
     "commands": {},
 }
 
@@ -86,12 +92,15 @@ _COMMENTS = {
     "alert_battery_percent": "Alert when unplugged and the battery drops to this",
     "keep_screenshots_days": "Delete screenshots and webcam photos older than this",
     "keep_logs_days": "Delete daily logs older than this",
+    "max_output_chars": "Cap on the text a tool returns to the model (longer output is cut with a note; 0 = no cap)",
+    "large_output_chars": "Log tool outputs bigger than this to ~/rose/logs/output-*.jsonl (see `rose tokens`)",
+    "disabled_tools": 'Tools ROSE should not offer at all, e.g. ["webcam_capture", "lock_screen"]',
     "commands": ('Command presets Rose can run by name (no shell, no arguments), e.g.\n'
                  '# notes-pull = ["git", "-C", "~/notes", "pull"]\n# disk = ["df", "-h", "/"]'),
 }
 
 
-def _toml_value(v) -> str:
+def _toml_value(v: Any) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, int):
@@ -137,13 +146,33 @@ def _ensure() -> None:
     write_default_config(values)
 
 
+_cache_lock = threading.Lock()
+_cache: dict[str, Any] = {"key": None, "cfg": None}
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 def load_config() -> dict:
+    """Current settings (defaults + config.toml + the tunnel's public URL).
+
+    Called on every tool call, so the parsed result is cached and re-read only when config.toml or
+    runtime.json changes on disk. Returns a fresh copy: callers may modify it freely."""
     _ensure()
-    with open(CONFIG_PATH, "rb") as f:
-        data = tomllib.load(f)
-    cfg = {**DEFAULT_CONFIG, **data}
-    cfg["public_url"] = get_public_url()
-    return cfg
+    key = (_stamp(CONFIG_PATH), _stamp(RUNTIME_PATH))
+    with _cache_lock:
+        if _cache["key"] != key:
+            with open(CONFIG_PATH, "rb") as f:
+                data = tomllib.load(f)
+            cfg = {**DEFAULT_CONFIG, **data}
+            cfg["public_url"] = get_public_url()
+            _cache.update(key=key, cfg=cfg)
+        return copy.deepcopy(_cache["cfg"])
 
 
 def update_settings(changes: dict) -> None:

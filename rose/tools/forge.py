@@ -24,7 +24,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from rose.common import ToolError, display_env
+from rose.common import ToolError, display_env, notify_desktop
 from rose.config import LOG_DIR, ROSE_HOME, load_config
 
 FORGE_DIR = ROSE_HOME / "forge"
@@ -186,11 +186,7 @@ def _launch(kind: str, prompt: str, allowed: list[str], deny: list[str], system:
     _save_meta(d, meta)
     _log({"ts": datetime.now().isoformat(timespec="seconds"), "event": "start", "job": job_id, "kind": kind,
           "caller": meta["caller"], **{k: v for k, v in extra.items() if k in ("task", "draft_id")}})
-    try:
-        subprocess.run(["notify-send", "--app-name=ROSE", "--urgency=low", f"Forge started ({kind})",
-                        (extra.get("task") or extra.get("draft_id", ""))[:120]], env=env, capture_output=True)
-    except OSError:
-        pass
+    notify_desktop(f"Forge started ({kind})", (extra.get("task") or extra.get("draft_id", ""))[:120], urgency="low")
     return job_id
 
 
@@ -262,11 +258,8 @@ def _report(job_id: str, wait: float) -> dict:
 # ---------------- tools ----------------
 
 def forge_run(task: str, wait: int = 45) -> dict:
-    """Ask Forge (Claude Code on the work account) to do a work task, described by intent, e.g. "find
-    the Drive notes on the ratings rework and draft an email with them to Yashraj". Forge can read
-    work Gmail/Drive/Docs/Sheets/Calendar/Notion and create Gmail drafts, but cannot send. Waits up
-    to `wait` seconds (max 55); if not done, returns a job_id for forge_status. If the result lists
-    drafts, show them to the user and only send with forge_send after they confirm."""
+    """Work task for Forge (work Gmail/Drive/Docs/Calendar/Notion; read + draft, never send), by intent.
+    Returns the result, or a job_id for forge_status after wait s (max 55). Show drafts before forge_send."""
     task = (task or "").strip()
     if not task:
         raise ToolError("Describe the task.")
@@ -282,8 +275,7 @@ def forge_status(job_id: str, wait: int = 45) -> dict:
 
 
 def forge_send(draft_id: str, confirm: bool = False, wait: int = 45) -> dict:
-    """Send a Gmail draft that a forge_run job created, exactly as drafted. Needs confirm=true, which
-    you may only pass after the user has seen the draft and explicitly said to send it."""
+    """Send a forge_run draft as-is. confirm=true only after the user saw it and said send."""
     if not DRAFT_ID_RE.match(draft_id or ""):
         raise ToolError("Invalid draft id.")
     origin = None

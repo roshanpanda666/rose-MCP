@@ -18,6 +18,9 @@ from typing import Literal
 from rose.common import ToolError, require, run, session_type
 from rose.config import load_config
 from rose.tools import screenshot
+from rose.tools.apps import active_window as _active
+from rose.tools.apps import focus_window
+from rose.tools.apps import window_matches as _matches
 
 _ENTER_KEYS = re.compile(r"(^|\+)(return|enter|kp_enter)$", re.IGNORECASE)
 _KEY_RE = re.compile(r"^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$")
@@ -27,7 +30,7 @@ def _check() -> None:
     if session_type() != "x11":
         raise ToolError("Input tools currently support X11 only.")
     if not load_config().get("input_enabled", True):
-        raise ToolError("Input control is disabled (input_enabled=false in ~/rose/config.json).")
+        raise ToolError("Input control is disabled (input_enabled=false in config.toml).")
     require("xdotool", "sudo apt install xdotool")
 
 
@@ -56,7 +59,7 @@ def mouse_click(
     clicks: int = 1,
     coords: Literal["screenshot", "screen"] = "screenshot",
 ) -> str:
-    """Click at (x, y). By default x/y are pixels in the latest screenshot preview."""
+    """Click at (x, y), in latest screenshot-preview pixels by default."""
     _check()
     sx, sy = _to_screen(x, y, coords)
     btn = {"left": "1", "middle": "2", "right": "3"}[button]
@@ -73,7 +76,7 @@ def scroll(
     amount: int = 3,
     coords: Literal["screenshot", "screen"] = "screenshot",
 ) -> str:
-    """Scroll at (x, y) by `amount` notches."""
+    """Scroll at (x, y) by amount notches."""
     _check()
     sx, sy = _to_screen(x, y, coords)
     btn = {"up": "4", "down": "5", "left": "6", "right": "7"}[direction]
@@ -83,30 +86,11 @@ def scroll(
     return f"Scrolled {direction} {amount} at screen ({sx}, {sy})."
 
 
-def _active() -> dict | None:
-    try:
-        from rose.tools.apps import list_windows
-        return next((w for w in list_windows() if w.get("active")), None)
-    except Exception:
-        return None
-
-
-def _matches(win: dict, window: str) -> bool:
-    w = window.strip().lower()
-    if w.startswith("0x") or w.isdigit():
-        try:
-            return int(win["id"], 16) == (int(w, 16) if w.startswith("0x") else int(w))
-        except ValueError:
-            return False
-    return w in (win.get("title") or "").lower() or w == (win.get("app") or "").lower()
-
-
 def _ensure_active(window: str) -> dict:
     """Focus-verify: make `window` (id or part of its title) the active window, or refuse."""
     act = _active()
     if act and _matches(act, window):
         return act
-    from rose.tools.apps import focus_window
     focus_window(window)  # raises if no/ambiguous match
     for _ in range(5):
         time.sleep(0.15)
@@ -144,10 +128,8 @@ def _readback(text: str) -> str:
 
 
 def type_text(text: str, confirm: bool = False, window: str = "", verify: bool = True) -> str:
-    """Type text into the focused window. Text with newlines (which press Enter) needs confirm=true.
-    Verify the target window is active first: pass `window` (id or part of its title) and ROSE focuses it
-    and refuses to type if it can't. Prefer ui_fill when the field is in the tree (ui_list). Afterwards
-    the result says which window got the text and whether read-back found it in the focused element."""
+    """Type into the focused window; newlines need confirm=true. Pass window= to focus-verify first.
+    Reports where text went and read-back."""
     _check()
     if ("\n" in text or "\r" in text) and not confirm:
         raise ToolError("This text contains newlines, which press Enter and may send or submit. "
@@ -171,10 +153,8 @@ def type_text(text: str, confirm: bool = False, window: str = "", verify: bool =
 
 
 def press_keys(keys: str, confirm: bool = False, window: str = "") -> str:
-    """Press a key or chord, xdotool style: 'ctrl+l', 'alt+Tab', 'Escape', 'ctrl+shift+t'.
-    Space-separate several presses: 'ctrl+a ctrl+c'. Any Enter/Return press needs confirm=true.
-    Pass `window` (id or part of its title) to make sure keys go to that window: ROSE focuses it first
-    and refuses if it can't. The result names the active window afterwards."""
+    """Press keys xdotool-style ('ctrl+l', 'alt+Tab'; space-separated for several). Enter needs confirm=true.
+    window= focus-verifies first."""
     _check()
     presses = keys.split()
     if not presses or len(presses) > 20:
@@ -195,7 +175,7 @@ def press_keys(keys: str, confirm: bool = False, window: str = "") -> str:
 
 
 def mouse_position() -> str:
-    """Current pointer position in screen pixels (and in the last screenshot, if it's on it)."""
+    """Pointer position (screen and last-screenshot pixels)."""
     _check()
     out = run(["xdotool", "getmouselocation", "--shell"]).decode()
     v = dict(line.split("=", 1) for line in out.split() if "=" in line)

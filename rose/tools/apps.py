@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,10 +22,22 @@ _APP_DIRS = [
     Path("/usr/local/share/applications"),
     Path("/usr/share/applications"),
 ]
+_apps_lock = threading.Lock()
+_apps_cache: dict = {"key": None, "apps": {}}
 
 
-def _installed_apps() -> dict[str, str]:
-    """Map desktop-file id -> display name for launchable apps (first match wins, like XDG)."""
+def _dirs_key() -> tuple:
+    """Changes whenever a .desktop file is added, removed or replaced in any app folder."""
+    key = []
+    for d in _APP_DIRS:
+        try:
+            key.append((str(d), d.stat().st_mtime_ns))
+        except OSError:
+            key.append((str(d), None))
+    return tuple(key)
+
+
+def _parse_apps() -> dict[str, str]:
     apps: dict[str, str] = {}
     for d in _APP_DIRS:
         if not d.is_dir():
@@ -45,8 +58,19 @@ def _installed_apps() -> dict[str, str]:
     return apps
 
 
+def _installed_apps() -> dict[str, str]:
+    """Map desktop-file id -> display name for launchable apps (first match wins, like XDG).
+
+    Parsing every .desktop file takes ~250 ms, so the result is cached until an app folder changes."""
+    key = _dirs_key()
+    with _apps_lock:
+        if _apps_cache["key"] != key:
+            _apps_cache.update(key=key, apps=_parse_apps())
+        return dict(_apps_cache["apps"])
+
+
 def list_apps(filter: str = "") -> str:
-    """List installed desktop apps as 'app_id: Name'. Use the app_id with open_app."""
+    """Installed apps as 'app_id: Name' (use app_id with open_app)."""
     f = filter.lower()
     rows = [f"{i}: {n}" for i, n in sorted(_installed_apps().items(), key=lambda kv: kv[1].lower())
             if f in i.lower() or f in n.lower()]
@@ -54,7 +78,7 @@ def list_apps(filter: str = "") -> str:
 
 
 def open_app(app: str) -> str:
-    """Launch an installed desktop app by app_id or name (no arguments, no shell)."""
+    """Launch an installed app by app_id or name."""
     apps = _installed_apps()
     q = app.lower().removesuffix(".desktop")
     match = next((i for i in apps if i.lower() == q), None) or next(
@@ -96,7 +120,7 @@ def _x():
     return d, X, protocol
 
 
-def _prop(d, win, name, kind=None):
+def _prop(d, win, name: str, kind=None):
     atom = d.intern_atom(name)
     p = win.get_full_property(atom, kind if kind is not None else 0)
     return p.value if p is not None else None
@@ -119,16 +143,20 @@ def _send(d, X, protocol, win, msg: str, data: list[int]) -> None:
     d.flush()
 
 
-def _windows(d):
+def _active_id(d) -> int | None:
+    active = _prop(d, d.screen().root, "_NET_ACTIVE_WINDOW")
+    return active[0] if active is not None and len(active) else None
+
+
+def _windows(d) -> list[dict]:
     root = d.screen().root
-    active = _prop(d, root, "_NET_ACTIVE_WINDOW")
-    active_id = active[0] if active is not None and len(active) else None
+    active_id = _active_id(d)
+    skip = {d.intern_atom("_NET_WM_WINDOW_TYPE_DOCK"), d.intern_atom("_NET_WM_WINDOW_TYPE_DESKTOP")}
     out = []
     for wid in _prop(d, root, "_NET_CLIENT_LIST") or []:
         w = d.create_resource_object("window", wid)
         try:
-            types = _prop(d, w, "_NET_WM_WINDOW_TYPE") or []
-            if d.intern_atom("_NET_WM_WINDOW_TYPE_DOCK") in types or d.intern_atom("_NET_WM_WINDOW_TYPE_DESKTOP") in types:
+            if skip & set(_prop(d, w, "_NET_WM_WINDOW_TYPE") or []):
                 continue
             cls = w.get_wm_class() or ("", "")
             pid = _prop(d, w, "_NET_WM_PID")
@@ -142,13 +170,13 @@ def _windows(d):
                 "x": pos.x, "y": pos.y, "width": g.width, "height": g.height,
                 "active": wid == active_id,
             })
-        except Exception:
+        except Exception:  # windows can vanish mid-query
             continue
     return out
 
 
 def list_windows() -> list[dict]:
-    """List open windows with id, title, app class, pid, position/size and which one is active."""
+    """Open windows: id, title, app, pid, geometry, active."""
     d, _, _ = _x()
     try:
         return _windows(d)
@@ -156,16 +184,34 @@ def list_windows() -> list[dict]:
         d.close()
 
 
+def active_window() -> dict | None:
+    """The active window (as in list_windows), or None if it can't be determined."""
+    try:
+        return next((w for w in list_windows() if w.get("active")), None)
+    except Exception:
+        return None
+
+
+def window_matches(win: dict, window: str) -> bool:
+    """Does `win` match `window`: an id (0x... or decimal), part of its title, or its exact app class?"""
+    w = window.strip().lower()
+    if w.startswith("0x") or w.isdigit():
+        try:
+            return int(win["id"], 16) == (int(w, 16) if w.startswith("0x") else int(w))
+        except ValueError:
+            return False
+    return w in (win.get("title") or "").lower() or w == (win.get("app") or "").lower()
+
+
 def _find(d, window: str) -> dict:
     wins = _windows(d)
     w = window.strip().lower()
     if w.startswith("0x") or w.isdigit():
-        wid = int(w, 16) if w.startswith("0x") else int(w)
-        for x in wins:
-            if int(x["id"], 16) == wid:
-                return x
+        hit = next((x for x in wins if window_matches(x, w)), None)
+        if hit:
+            return hit
         raise ToolError(f"No window with id {window}. Use list_windows.")
-    hits = [x for x in wins if w in x["title"].lower() or w == x["app"].lower()]
+    hits = [x for x in wins if window_matches(x, w)]
     if len(hits) == 1:
         return hits[0]
     if not hits:
@@ -175,23 +221,26 @@ def _find(d, window: str) -> dict:
 
 
 def focus_window(window: str) -> str:
-    """Bring a window to the front and focus it. `window` is an id from list_windows or part of its title."""
+    """Focus a window (id from list_windows or part of its title)."""
     d, X, protocol = _x()
     try:
         target = _find(d, window)
-        wobj = d.create_resource_object("window", int(target["id"], 16))
+        wid = int(target["id"], 16)
+        wobj = d.create_resource_object("window", wid)
         # source indication 2 = pager/user action, so window managers don't refuse the request.
         _send(d, X, protocol, wobj, "_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0])
-        time.sleep(0.3)
-        active = _prop(d, d.screen().root, "_NET_ACTIVE_WINDOW")
-        ok = active is not None and len(active) and active[0] == int(target["id"], 16)
+        ok = False
+        deadline = time.monotonic() + 0.3  # same 0.3 s budget as before, but return as soon as it's active
+        while not ok and time.monotonic() < deadline:
+            time.sleep(0.03)
+            ok = _active_id(d) == wid
         return f"{'Focused' if ok else 'Asked the window manager to focus'}: {target['title']} ({target['id']})"
     finally:
         d.close()
 
 
 def close_window(window: str, confirm: bool = False) -> str:
-    """Politely ask a window to close (the app may prompt to save). Needs confirm=true."""
+    """Ask a window to close (app may prompt to save). Needs confirm=true."""
     d, X, protocol = _x()
     try:
         target = _find(d, window)
@@ -202,3 +251,72 @@ def close_window(window: str, confirm: bool = False) -> str:
         return f"Asked '{target['title']}' to close."
     finally:
         d.close()
+
+
+# ---------- moving windows between monitors ----------
+
+_MOVE_FLAGS = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) | (2 << 12)  # x, y, w, h set; source = pager/user
+_NORTH_WEST = 1
+
+
+def target_rect(win: dict, mons: list[dict], monitor: int | None, x: int | None, y: int | None,
+                width: int | None, height: int | None) -> tuple[int, int, int, int]:
+    """Where a window should go: on `monitor` (same relative offset, size clamped to fit) or at x/y.
+    Width/height default to the window's current size."""
+    w = max(100, width or win["width"])
+    h = max(100, height or win["height"])
+    if monitor is None:
+        if x is None and y is None:
+            raise ToolError("Give monitor=<index> (see list_monitors) or x/y in screen pixels.")
+        return (win["x"] if x is None else x), (win["y"] if y is None else y), w, h
+    by_index = {m["index"]: m for m in mons}
+    if monitor not in by_index:
+        raise ToolError(f"No monitor {monitor}. Monitors: {[(m['index'], m['name']) for m in mons] or 'unknown'}")
+    dst = by_index[monitor]
+    cx, cy = win["x"] + win["width"] // 2, win["y"] + win["height"] // 2
+    src = next((m for m in mons if m["x"] <= cx < m["x"] + m["width"] and m["y"] <= cy < m["y"] + m["height"]), None)
+    w, h = min(w, dst["width"]), min(h, dst["height"])
+    if src is not None and x is None and y is None:  # keep the same place relative to the monitor
+        nx, ny = dst["x"] + (win["x"] - src["x"]), dst["y"] + (win["y"] - src["y"])
+    else:
+        nx = dst["x"] + (x if x is not None else (dst["width"] - w) // 2)
+        ny = dst["y"] + (y if y is not None else (dst["height"] - h) // 2)
+    nx = max(dst["x"], min(nx, dst["x"] + dst["width"] - w))
+    ny = max(dst["y"], min(ny, dst["y"] + dst["height"] - h))
+    return nx, ny, w, h
+
+
+def _set_maximized(d, X, protocol, wobj, on: bool) -> None:
+    vert, horz = d.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT"), d.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")
+    _send(d, X, protocol, wobj, "_NET_WM_STATE", [1 if on else 0, vert, horz, 2])
+
+
+def move_window(window: str, monitor: int | None = None, x: int | None = None, y: int | None = None,
+                width: int | None = None, height: int | None = None, maximize: bool | None = None) -> str:
+    """Move/resize a window (id or title part): monitor=<index> (list_monitors) or x/y screen px; maximize=true/false."""
+    from rose.tools.screenshot import monitors
+
+    d, X, protocol = _x()
+    try:
+        target = _find(d, window)
+        wid = int(target["id"], 16)
+        wobj = d.create_resource_object("window", wid)
+        state = set(_prop(d, wobj, "_NET_WM_STATE") or [])
+        was_max = d.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT") in state
+        nx, ny, w, h = target_rect(target, monitors(), monitor, x, y, width, height)
+        if was_max:  # a maximized window ignores move requests
+            _set_maximized(d, X, protocol, wobj, False)
+            time.sleep(0.1)
+        _send(d, X, protocol, wobj, "_NET_MOVERESIZE_WINDOW", [_MOVE_FLAGS | _NORTH_WEST, nx, ny, w, h])
+        if maximize or (maximize is None and was_max):
+            time.sleep(0.15)
+            _set_maximized(d, X, protocol, wobj, True)
+        time.sleep(0.3)
+        now = next((wi for wi in _windows(d) if int(wi["id"], 16) == wid), None)
+    finally:
+        d.close()
+    where = f"monitor {monitor}" if monitor is not None else f"({nx}, {ny})"
+    if now is None:
+        return f"Asked to move '{target['title'][:60]}' to {where}."
+    return (f"Moved '{target['title'][:60]}' to {where}: now at ({now['x']}, {now['y']}) "
+            f"{now['width']}x{now['height']}.")

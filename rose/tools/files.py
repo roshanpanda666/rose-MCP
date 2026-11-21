@@ -1,4 +1,4 @@
-"""File tools, restricted to the allowlisted directories in ~/rose/config.json."""
+"""File tools, restricted to the allowlisted directories (allowed_dirs in config.toml)."""
 
 from __future__ import annotations
 
@@ -39,12 +39,12 @@ def _fmt_size(n: int) -> str:
 
 
 def list_allowed_dirs() -> list[str]:
-    """List the folders the file tools are allowed to access."""
+    """Folders the file tools may use."""
     return [str(d) for d in allowed_dirs()]
 
 
 def list_dir(path: str, show_hidden: bool = False) -> str:
-    """List a directory's entries with type, size and modification time."""
+    """List a directory: type, size, mtime, name."""
     p = _resolve(path)
     if not p.is_dir():
         raise ToolError(f"Not a directory: {p}")
@@ -63,22 +63,24 @@ def list_dir(path: str, show_hidden: bool = False) -> str:
     return f"{p}\n" + ("\n".join(lines) if lines else "(empty)")
 
 
-def read_file(path: str) -> str:
-    """Read a UTF-8 text file."""
+def read_file(path: str, offset: int = 0) -> str:
+    """Read a UTF-8 text file. offset = start char (for paging past the output cap)."""
     p = _resolve(path)
     if not p.is_file():
         raise ToolError(f"Not a file: {p}")
     limit = load_config()["max_read_bytes"]
-    if p.stat().st_size > limit:
-        raise ToolError(f"{p} is {_fmt_size(p.stat().st_size)}, over the {_fmt_size(limit)} read limit.")
+    size = p.stat().st_size
+    if size > limit:
+        raise ToolError(f"{p} is {_fmt_size(size)}, over the {_fmt_size(limit)} read limit.")
     try:
-        return p.read_text()
+        text = p.read_text()
     except UnicodeDecodeError:
-        raise ToolError(f"{p} is not a UTF-8 text file.")
+        raise ToolError(f"{p} is not a UTF-8 text file.") from None
+    return text[max(0, offset):] if offset else text
 
 
 def write_file(path: str, content: str, overwrite: bool = False, confirm: bool = False) -> str:
-    """Write a text file. Replacing an existing file needs overwrite=true and confirm=true."""
+    """Write a text file. Replacing one needs overwrite=true and confirm=true."""
     p = _resolve(path)
     if p.is_dir():
         raise ToolError(f"{p} is a directory.")
@@ -92,7 +94,7 @@ def write_file(path: str, content: str, overwrite: bool = False, confirm: bool =
 
 
 def move_file(source: str, destination: str, confirm: bool = False) -> str:
-    """Move or rename a file or folder. Replacing an existing destination file needs confirm=true."""
+    """Move/rename a file or folder. Replacing a file needs confirm=true."""
     src = _resolve(source)
     dst = _resolve(destination)
     if not src.exists():
@@ -113,7 +115,7 @@ def move_file(source: str, destination: str, confirm: bool = False) -> str:
 def search_files(
     root: str, name_pattern: str = "*", contains: str = "", max_results: int = 50
 ) -> str:
-    """Find files under `root` whose name matches a glob and, optionally, whose text contains a string."""
+    """Find files under root by name glob, optionally containing text."""
     base = _resolve(root)
     if not base.is_dir():
         raise ToolError(f"Not a directory: {base}")

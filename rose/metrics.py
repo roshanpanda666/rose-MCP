@@ -38,9 +38,7 @@ def _counts() -> dict:
 
 
 def observation_stats(days: int = 1, recent_tasks: int = 10) -> dict:
-    """Tree-first metrics: counts of accessibility-tree/DOM calls vs screenshots vs coordinate clicks over
-    the last `days` days, per caller, plus the most recent GUI "tasks" (bursts of GUI calls). Use it to
-    check that screenshots are only the fallback."""
+    """Tree vs screenshot vs coordinate-click counts per caller and recent GUI tasks."""
     days = max(1, min(days, 30))
     totals, per_caller, tasks, open_task = _counts(), {}, [], {}
     for e, kind in _entries(days):

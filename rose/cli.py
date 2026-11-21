@@ -16,6 +16,8 @@
     rose push setup|test      Phone notifications (ntfy)
     rose cleanup              Delete old screenshots/logs now
     rose watch                Watchers + schedules (runs as rose-watch.service)
+    rose freellm set-key|status  FreeLLMAPI bridge (freellm_* tools)
+    rose tokens [--days N] [--schema]  Token-heavy tool outputs (and tool-list size)
     rose gui                  Open the dashboard
     rose install-desktop      App-menu launcher + open the dashboard at login
 """
@@ -25,51 +27,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
-import signal
-import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 
-from rose.config import CONFIG_PATH, LOG_DIR, ROSE_HOME, get_public_url, load_config, set_public_url
+from rose.common import http_status as _http_code
+from rose.common import probe_unauth as _unauth_probe
+from rose.common import systemctl_user as _systemctl
+from rose.config import CONFIG_PATH, LOG_DIR, ROSE_HOME, get_public_url, load_config
 
 SERVICE = "rose"
 TUNNEL_SERVICE = "rose-tunnel"
-
-
-def _http_code(url: str, method: str = "GET", data: bytes | None = None, headers: dict | None = None,
-               timeout: float = 5) -> int | None:
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception:
-        return None
-
-
-def _unauth_probe(base: str) -> int | None:
-    """Status of an unauthenticated MCP request; must be 401 for a safe deployment."""
-    return _http_code(f"{base}/mcp", "POST", b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
-                      {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-                      timeout=10)
-
-
-def _systemctl(*args: str) -> str:
-    if not shutil.which("systemctl"):
-        return "n/a"
-    r = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
-    return r.stdout.strip() or r.stderr.strip()
-
-
-def _notify(title: str, body: str) -> None:
-    if shutil.which("notify-send"):
-        subprocess.run(["notify-send", "--app-name=ROSE", title, body], capture_output=True)
 
 
 # ---------------- commands ----------------
@@ -133,6 +102,7 @@ def cmd_logs(args) -> int:
         return 1
     cmd = ["tail", f"-n{args.n}"] + (["-f"] if args.follow else []) + [str(path)]
     os.execvp("tail", cmd)
+    return 0  # not reached: execvp replaces this process
 
 
 def cmd_config(args) -> int:
@@ -353,6 +323,45 @@ def cmd_email(args) -> int:
     return mailer.setup_cli(args.rest)
 
 
+def cmd_freellm(args) -> int:
+    from rose.tools import freellm
+    return freellm.cli(args.rest)
+
+
+def cmd_tokens(args) -> int:
+    """Which tools send the most text to the model (from the large-output log), and the tool-list size."""
+    from rose import output
+
+    if args.schema:
+        import asyncio
+
+        from mcp.server.mcpserver import MCPServer
+
+        from rose.server import INSTRUCTIONS, register_tools
+        m = MCPServer(name="rose")
+        register_tools(m)
+        rows = []
+        for t in asyncio.run(m.list_tools()):
+            size = len(json.dumps({"name": t.name, "description": t.description, "inputSchema": t.input_schema},
+                                  separators=(",", ":")))
+            rows.append((size // 4, t.name))
+        total = sum(r[0] for r in rows) + len(INSTRUCTIONS) // 4
+        print(f"Tool list + instructions: ~{total} tokens ({len(rows)} tools, instructions ~{len(INSTRUCTIONS) // 4})")
+        for tok, name in sorted(rows, reverse=True)[:15]:
+            print(f"  {tok:6}  {name}")
+        return 0
+    rows = output.report(args.days)
+    if not rows:
+        print(f"No tool output over large_output_chars ({load_config().get('large_output_chars')}) "
+              f"in the last {args.days} days.")
+        return 0
+    print(f"{'tool':26}{'calls':>6}{'avg tok':>9}{'max tok':>9}{'cut':>5}{'total':>9}")
+    for r in rows:
+        print(f"{r['tool']:26}{r['large_calls']:>6}{r['avg_tokens']:>9}{r['max_tokens']:>9}"
+              f"{r['truncated']:>5}{r['total_tokens']:>9}")
+    return 0
+
+
 def cmd_auth(args) -> int:
     from rose import auth
     return auth._cli(args.rest)
@@ -405,6 +414,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("email", help="bridge emails: setup | test | status | off")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_email)
+    p = sub.add_parser("freellm", help="FreeLLMAPI bridge: set-key | status")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_freellm)
+    p = sub.add_parser("tokens", help="token-heavy tool outputs (and tool-list size with --schema)")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--schema", action="store_true", help="size of the tool list sent to the model")
+    p.set_defaults(fn=cmd_tokens)
     p = sub.add_parser("auth", help="set-passphrase | new-token | label | list | revoke")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_auth)

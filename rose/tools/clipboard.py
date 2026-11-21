@@ -8,7 +8,7 @@ from rose.common import ToolError, display_env, require, run, session_type
 
 
 def clipboard_read() -> str:
-    """Return the current text contents of the system clipboard."""
+    """Clipboard text."""
     if session_type() == "wayland":
         require("wl-paste", "sudo apt install wl-clipboard")
         cmd = ["wl-paste", "--no-newline"]
@@ -25,7 +25,7 @@ def clipboard_read() -> str:
 
 
 def clipboard_write(text: str) -> str:
-    """Replace the system clipboard contents with `text`."""
+    """Set clipboard text."""
     if session_type() == "wayland":
         require("wl-copy", "sudo apt install wl-clipboard")
         cmd = ["wl-copy"]
