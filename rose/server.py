@@ -29,8 +29,8 @@ from rose import watch  # noqa: E402
 from rose.common import logged  # noqa: E402
 from rose.config import load_config  # noqa: E402
 from rose.tools import (  # noqa: E402
-    apps, bridge, browser, clipboard, device, files, forge, freellm, github, input, notify, quick, screenshot,
-    system, ui, webcam,
+    apps, bridge, browser, clipboard, device, files, forge, freellm, github, input, notify, phone, power, quick,
+    recorder, screenshot, system, ui, webcam,
 )
 
 INSTRUCTIONS = (
@@ -189,6 +189,28 @@ def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
         (bridge.bridge_read, READ_ONLY),
         (bridge.bridge_post, WRITES),
         (apps.move_window, WRITES),  # newest last: appending keeps earlier tools' order (prompt cache)
+        (screenshot.screen_frame, READ_ONLY),
+        (apps.arrange_window, WRITES),
+        (apps.tile_windows, WRITES),
+        (apps.workspace, WRITES),
+        (power.power_control, DESTRUCTIVE),
+        (phone.phone_devices, READ_ONLY),
+        (phone.phone_connect, WRITES),
+        (phone.phone_screenshot, READ_ONLY),
+        (phone.phone_open_app, WRITES),
+        (phone.phone_tap, WRITES),
+        (phone.phone_swipe, WRITES),
+        (phone.phone_type, WRITES),
+        (phone.phone_key, WRITES),
+        (recorder.recording_start, WRITES),
+        (recorder.recording_stop, WRITES),
+        (recorder.recording_status, READ_ONLY),
+        (recorder.recording_list, READ_ONLY),
+        (webcam.webcam_live_frame, WRITES),
+        (webcam.webcam_live_stop, WRITES),
+        (recorder.mic_sources, READ_ONLY),
+        (recorder.mic_live_start, WRITES),
+        (recorder.mic_live_stop, WRITES),
     ]
 
 

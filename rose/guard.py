@@ -49,16 +49,21 @@ UNTRUSTED_TOOLS = {
     "github_my_prs", "github_pr_status", "github_ci_runs", "github_notifications", "list_windows",
     "media_control", "wifi_networks", "bluetooth_devices", "run_command", "take_screenshot", "webcam_capture",
     "list_apps", "audio_devices", "ui_list", "ui_read", "browser_read", "browser_tabs", "browser_status",
-    "schedule_list", "watch_status", "freellm_ask", "freellm_web_search",
+    "schedule_list", "watch_status", "freellm_ask", "freellm_web_search", "screen_frame", "phone_screenshot",
+    "workspace", "webcam_live_frame",
 }
 
 # Mouse/keyboard control from a remote client needs approval, because a click can press "Send"
 # without any confirm step.
 GUI_TOOLS = {"mouse_click", "scroll", "type_text", "press_keys", "ui_click", "ui_fill",
-             "browser_click", "browser_fill", "browser_press"}
+             "browser_click", "browser_fill", "browser_press",
+             # the phone (ADB): taps and typing can send messages; connecting grants control
+             "phone_connect", "phone_tap", "phone_swipe", "phone_type", "phone_key", "phone_open_app"}
 # Approving once opens a time-limited grant for that client (approval_grant_minutes, default 60):
 # until it expires, that client's actions don't ask again. Other clients still need their own approval.
 GRANT_FILE = ROSE_HOME / "approval_grant.json"
+# Always approval-gated for remote clients, whatever approval_required_tools says (camera access).
+ALWAYS_APPROVE = {"webcam_capture", "webcam_live_frame", "mic_live_start"}
 
 # Typical prompt-injection phrasing. A hit is a warning sign, not proof (and a miss proves nothing).
 INJECTION_PATTERNS = [
@@ -332,7 +337,7 @@ def guarded(name: str, fn: Callable, read_only: bool) -> Callable:
                      if k != "confirm"}
             if has_confirm and kwargs.get("confirm"):
                 return _new_approval(name, bound, who)
-            if name in set(cfg.get("approval_required_tools", ["webcam_capture"])):
+            if name in set(cfg.get("approval_required_tools", ["webcam_capture"])) | ALWAYS_APPROVE:
                 return _new_approval(name, bound, who)
             if name in GUI_TOOLS:
                 return _new_approval(name, bound, who)

@@ -292,3 +292,33 @@ def snapshot(include_image: bool = True, monitor: int | None = None, include_tex
         if text is not None:
             out.append(text.result())
     return out
+
+
+def screen_frame(monitor: int | None = None, max_side: int = 1280, quality: int = 60) -> list:
+    """Live-view frame: JPEG of the active window's monitor (monitor=N, or -1 for all), no file, no OCR."""
+    from mcp.server.mcpserver import Image
+
+    max_side = max(320, min(int(max_side), 1920))
+    quality = max(30, min(int(quality), 90))
+    img = _grab_x11()
+    if img is None:  # Wayland / no XCB: fall back to a regular capture
+        img = _open(take_screenshot())
+    if monitor is not None and monitor < 0:
+        rect, label = None, "full desktop"
+    else:
+        rect, label = resolve_area("auto" if monitor is None else "monitor", monitor)
+    ox = oy = 0
+    if rect is not None:
+        ox, oy, x1, y1 = _clamp(img, rect)
+        img = img.crop((ox, oy, x1, y1))
+    else:
+        img = img.copy()
+    full_w, full_h = img.size
+    img.thumbnail((max_side, max_side))
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    meta = {"offset_x": ox, "offset_y": oy, "scale": round(full_w / img.width, 5), "width": img.width,
+            "height": img.height, "screen_width": full_w, "screen_height": full_h, "area": label}
+    import json
+
+    return [json.dumps(meta), Image(data=buf.getvalue(), format="jpeg")]

@@ -88,3 +88,15 @@ def test_rate_limit(remote, monkeypatch):
 def test_untrusted_tools_are_labelled(remote):
     tool = guard.guarded("read_file", lambda path: "file text", read_only=True)
     assert tool("x")["_untrusted_content_notice"] == guard.UNTRUSTED_NOTE
+
+
+def test_webcam_live_always_needs_remote_approval(remote, settings):
+    settings(approval_required_tools=[])  # even with the config list emptied
+    tool = guard.guarded("webcam_live_frame", lambda device="": "frame", read_only=False)
+    assert tool()["status"] == "approval_required"
+
+
+def test_mic_live_always_needs_remote_approval(remote, settings):
+    settings(approval_required_tools=[])
+    tool = guard.guarded("mic_live_start", lambda source="": {"stream": "x"}, read_only=False)
+    assert tool()["status"] == "approval_required"

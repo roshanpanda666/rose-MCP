@@ -14,7 +14,7 @@ Built with the official MCP Python SDK (`mcp` 2.x, where `FastMCP` is now called
 | Notifications | `send_notification` |
 | Apps & windows | `list_apps`, `open_app` (installed desktop apps only, no arguments), `open_url` (http/https only), `list_windows`, `focus_window`, `move_window` (to another monitor or x/y, keeps or sets maximized), `close_window` (polite close, needs `confirm`) |
 | Mouse & keyboard | `mouse_click`, `scroll`, `type_text`, `press_keys` (both take an optional `window=` to focus-verify first), `mouse_position` |
-| Webcam | `list_cameras`, `webcam_capture` (saved to `~/rose/webcam/`; shows a desktop notification on every capture) |
+| Webcam | `list_cameras`, `webcam_capture` (saved to `~/rose/webcam/`; shows a desktop notification on every capture), `webcam_live_frame` / `webcam_live_stop` (live view: one overwritten frame, about 2 frames a second, stops 60 s after the last request; always needs approval from remote clients) |
 | GitHub (read-only) | `github_my_prs`, `github_pr_status`, `github_ci_runs`, `github_notifications` (uses `gh`) |
 | Files | `list_allowed_dirs`, `list_dir`, `read_file` (`offset=` pages past the output cap), `write_file`, `move_file`, `search_files`, all limited to the allowlist |
 | System | `system_status` (CPU, RAM, disk, battery, top processes) |
@@ -22,6 +22,11 @@ Built with the official MCP Python SDK (`mcp` 2.x, where `FastMCP` is now called
 | Command presets | `list_commands` and `run_command(name)` run the fixed commands under `[commands]` in `config.toml`. There's no shell and no arguments. |
 | Quick settings | `quick_settings`, `set_quick_setting(setting, value)` for Wi-Fi, Bluetooth, Airplane mode, Power mode, Night Light, Dark Style, Do Not Disturb, Caffeine, volume, mute and brightness, plus `lock_screen`. Wi-Fi off and Airplane on need `confirm` and undo themselves automatically (default 2 min) through a systemd timer, because they cut ROSE's own connection. |
 | FreeLLMAPI | `freellm_ask`, `freellm_web_search`, `freellm_info(kind)` (health, models, providers, usage, quota, routing, cache), `freellm_set_routing`, `freellm_clear_cache` (needs `confirm`). They forward to the local FreeLLMAPI router on `127.0.0.1:3001`, which stays off the internet; see below. |
+| Layouts | `arrange_window` (left/right/top/bottom halves, quarters, center, maximize, restore, minimize), `tile_windows` (two windows side by side), `workspace` (list, switch, move a window; numbered from 1) |
+| Live view | `screen_frame`: a JPEG of a monitor with its coordinate mapping. No file is saved and no OCR runs, which makes it cheap enough for a 1-frame-per-second live view (used by the phone app) |
+| Power | `power_control` (sleep, restart, shutdown, logout, cancel). Needs `confirm`, runs after a delay (default 15 s) through a systemd timer, and can be cancelled |
+| Phone (ADB) | `phone_devices`, `phone_connect` (wireless debugging, with optional pairing), `phone_screenshot`, `phone_open_app`, `phone_tap`, `phone_swipe`, `phone_type`, `phone_key`. From remote clients, every action that changes the phone needs approval, like the laptop's mouse |
+| Recorder | `recording_start` (mic, optionally plus system audio; needs `confirm`; shows a desktop notification), `recording_stop`, `recording_status`, `recording_list`. Files go to `~/rose/recordings/` (0700); ffmpeg runs as the `rose-recording` user service, so it survives `rose reload` |
 
 ROSE is **tree-first**: observe through the accessibility tree (`ui_list`, `ui_read`) or the browser DOM (`browser_read`), act by name (`ui_click`, `ui_fill`, `browser_click`, `browser_fill`), then read back to confirm. Screenshots are the fallback for apps with no tree (canvas, games, remote desktops, video), for read-back failures the tree can't explain, and for visual questions. `observation_stats` reports tree calls vs screenshots per caller and per task (bursts of GUI calls), so you can watch the screenshot rate.
 
@@ -256,7 +261,7 @@ ROSE's tool list is sent to the model every session, and every tool result lands
 - **Fewer tools.** Rarely used diagnostics are merged: FreeLLMAPI's nine read-only tools are now one `freellm_info(kind)`. Drop more with `disabled_tools`.
 - **Find heavy tools.** Outputs over `large_output_chars` go to `~/rose/logs/output-YYYY-MM-DD.jsonl`.
   - `rose tokens` ranks the tools by output tokens.
-  - `rose tokens --schema` shows how big the tool list is (currently about 5.5k tokens for 78 tools, including the instructions).
+  - `rose tokens --schema` shows how big the tool list is (currently about 6.8k tokens for 96 tools, including the instructions).
 
 Untrusted-content labels and injection warnings are never trimmed.
 

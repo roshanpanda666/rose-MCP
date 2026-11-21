@@ -288,3 +288,62 @@ def test_move_window_targets():
         apps.target_rect(win, MONS, 3, None, None, None, None)
     with pytest.raises(ToolError, match="monitor=<index>"):
         apps.target_rect(win, MONS, None, None, None, None, None)
+
+
+# ---------------- layouts, power, phone, recorder ----------------
+
+from rose.tools import phone, power, recorder  # noqa: E402
+
+
+def test_layout_rects():
+    area = (0, 26, 1920, 1054)
+    assert apps.layout_rect(area, "left") == (0, 26, 960, 1054)
+    assert apps.layout_rect(area, "right") == (960, 26, 960, 1054)
+    assert apps.layout_rect((1920, 26, 1920, 1054), "bottom_right") == (2880, 553, 960, 527)
+
+
+def test_power_needs_confirm(monkeypatch):
+    ran = []
+    monkeypatch.setattr(power, "run", lambda cmd, **k: ran.append(cmd) or b"")
+    with pytest.raises(ToolError, match="confirm=true"):
+        power.power_control("shutdown")
+    assert ran == []
+    power.power_control("sleep", confirm=True, delay_seconds=1)
+    assert ran[0][:4] == ["systemd-run", "--user", "--collect", "--unit=rose-power-sleep"]
+    assert "--on-active=5s" in ran[0] and ran[0][-2:] == ["systemctl", "suspend"]  # minimum 5 s delay
+
+
+def test_recording_needs_confirm(monkeypatch):
+    monkeypatch.setattr(recorder, "_active", lambda: False)
+    ran = []
+    monkeypatch.setattr(recorder, "run", lambda cmd, **k: ran.append(cmd) or b"")
+    with pytest.raises(ToolError, match="confirm=true"):
+        recorder.recording_start("standup")
+    assert ran == []
+
+
+def test_phone_guards(monkeypatch):
+    calls = []
+    monkeypatch.setattr(phone, "_adb", lambda *a, **k: calls.append(a) or "")
+    with pytest.raises(ToolError, match="confirm=true"):
+        phone.phone_key("enter")
+    with pytest.raises(ToolError, match="phone_screenshot first"):
+        phone._last = None
+        phone.phone_tap(10, 10)
+    phone._last = phone._Map(2.0, 540, 1170)
+    phone.phone_tap(100, 200)
+    assert calls[-1] == ("shell", "input tap 200 400")
+    phone.phone_type("hi there")
+    assert calls[-1] == ("shell", "input text hi%sthere")
+    with pytest.raises(ToolError, match="IP:port"):
+        phone.phone_connect("not an address; rm -rf")
+
+
+def test_new_gui_tools_need_remote_approval(monkeypatch):
+    from rose import guard
+
+    monkeypatch.setattr(guard, "caller", lambda: "Phone app")
+    guard.end_grant("test")
+    guarded = guard.guarded("phone_tap", lambda x, y: "tapped", read_only=False)
+    assert guarded(1, 2)["status"] == "approval_required"
+    assert "power_control" not in guard.GUI_TOOLS  # it has confirm=true -> approval anyway

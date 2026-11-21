@@ -31,6 +31,13 @@ def _quiet(monkeypatch):
     monkeypatch.setattr(rose.guard, "notify_desktop", lambda *a, **k: None)
     monkeypatch.setattr(rose.push, "notify_desktop", lambda *a, **k: None)
     monkeypatch.setattr(rose.push, "push", lambda *a, **k: False)
+    import rose.tools.forge
+    import rose.tools.power
+    import rose.tools.recorder
+    import rose.tools.webcam
+
+    for mod in (rose.tools.power, rose.tools.recorder, rose.tools.webcam, rose.tools.forge):
+        monkeypatch.setattr(mod, "notify_desktop", lambda *a, **k: None)
     yield
 
 

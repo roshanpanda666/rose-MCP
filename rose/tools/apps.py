@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from rose.common import ToolError, display_env, require, session_type
@@ -320,3 +321,139 @@ def move_window(window: str, monitor: int | None = None, x: int | None = None, y
         return f"Asked to move '{target['title'][:60]}' to {where}."
     return (f"Moved '{target['title'][:60]}' to {where}: now at ({now['x']}, {now['y']}) "
             f"{now['width']}x{now['height']}.")
+
+
+# ---------- layouts and workspaces ----------
+
+Layout = Literal["left", "right", "top", "bottom", "top_left", "top_right", "bottom_left", "bottom_right",
+                 "center", "maximize", "restore", "minimize"]
+
+_FRACTIONS = {  # (x, y, w, h) as fractions of the monitor's usable area
+    "left": (0, 0, .5, 1), "right": (.5, 0, .5, 1), "top": (0, 0, 1, .5), "bottom": (0, .5, 1, .5),
+    "top_left": (0, 0, .5, .5), "top_right": (.5, 0, .5, .5), "bottom_left": (0, .5, .5, .5),
+    "bottom_right": (.5, .5, .5, .5), "center": (.15, .1, .7, .8),
+}
+
+
+def _work_area(d, mon: dict) -> tuple[int, int, int, int]:
+    """The monitor's rectangle minus panels (intersected with _NET_WORKAREA of the current desktop)."""
+    root = d.screen().root
+    wa = _prop(d, root, "_NET_WORKAREA")
+    cur = _prop(d, root, "_NET_CURRENT_DESKTOP")
+    x, y, w, h = mon["x"], mon["y"], mon["width"], mon["height"]
+    if wa is not None and len(wa) >= 4:
+        i = (cur[0] if cur is not None and len(cur) else 0) * 4
+        i = i if i + 4 <= len(wa) else 0
+        ax, ay, aw, ah = wa[i:i + 4]
+        nx, ny = max(x, ax), max(y, ay)
+        nw, nh = min(x + w, ax + aw) - nx, min(y + h, ay + ah) - ny
+        if nw > 100 and nh > 100:
+            return nx, ny, nw, nh
+    return x, y, w, h
+
+
+def _monitor_of(win: dict, mons: list[dict], monitor: int | None) -> dict:
+    if monitor is not None:
+        m = next((m for m in mons if m["index"] == monitor), None)
+        if m is None:
+            raise ToolError(f"No monitor {monitor}. Monitors: {[(m['index'], m['name']) for m in mons] or 'unknown'}")
+        return m
+    cx, cy = win["x"] + win["width"] // 2, win["y"] + win["height"] // 2
+    return next((m for m in mons if m["x"] <= cx < m["x"] + m["width"] and m["y"] <= cy < m["y"] + m["height"]),
+                mons[0] if mons else {"index": 0, "x": 0, "y": 0, "width": win["width"], "height": win["height"]})
+
+
+def layout_rect(area: tuple[int, int, int, int], layout: str) -> tuple[int, int, int, int]:
+    """Pixel rectangle for a layout inside a usable area."""
+    ax, ay, aw, ah = area
+    fx, fy, fw, fh = _FRACTIONS[layout]
+    return ax + round(aw * fx), ay + round(ah * fy), round(aw * fw), round(ah * fh)
+
+
+def _place(d, X, protocol, wobj, rect: tuple[int, int, int, int]) -> None:
+    _set_maximized(d, X, protocol, wobj, False)
+    time.sleep(0.08)
+    _send(d, X, protocol, wobj, "_NET_MOVERESIZE_WINDOW", [_MOVE_FLAGS | _NORTH_WEST, *rect])
+
+
+def arrange_window(window: str, layout: Layout, monitor: int | None = None) -> str:
+    """Snap a window: left/right/top/bottom halves, quarters, center, maximize, restore or minimize."""
+    from rose.tools.screenshot import monitors
+
+    d, X, protocol = _x()
+    try:
+        target = _find(d, window)
+        wid = int(target["id"], 16)
+        wobj = d.create_resource_object("window", wid)
+        if layout == "minimize":
+            root = d.screen().root
+            ev = protocol.event.ClientMessage(window=wobj, client_type=d.intern_atom("WM_CHANGE_STATE"),
+                                              data=(32, [3, 0, 0, 0, 0]))  # 3 = IconicState
+            root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.flush()
+            return f"Minimized '{target['title'][:60]}'."
+        if layout == "maximize":
+            _set_maximized(d, X, protocol, wobj, True)
+            return f"Maximized '{target['title'][:60]}'."
+        if layout == "restore":
+            _set_maximized(d, X, protocol, wobj, False)
+            _send(d, X, protocol, wobj, "_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0])  # also un-minimizes
+            return f"Restored '{target['title'][:60]}'."
+        mon = _monitor_of(target, monitors(), monitor)
+        rect = layout_rect(_work_area(d, mon), layout)
+        _place(d, X, protocol, wobj, rect)
+        return f"Moved '{target['title'][:60]}' to the {layout.replace('_', ' ')} of monitor {mon['index']}."
+    finally:
+        d.close()
+
+
+def tile_windows(left_window: str, right_window: str, monitor: int | None = None) -> str:
+    """Put two windows side by side (left and right halves) on one monitor."""
+    from rose.tools.screenshot import monitors
+
+    d, X, protocol = _x()
+    try:
+        a, b = _find(d, left_window), _find(d, right_window)
+        if a["id"] == b["id"]:
+            raise ToolError("Those are the same window; name two different ones.")
+        mon = _monitor_of(a, monitors(), monitor)
+        area = _work_area(d, mon)
+        for win, side in ((a, "left"), (b, "right")):
+            _place(d, X, protocol, d.create_resource_object("window", int(win["id"], 16)), layout_rect(area, side))
+        return f"Tiled '{a['title'][:40]}' (left) and '{b['title'][:40]}' (right) on monitor {mon['index']}."
+    finally:
+        d.close()
+
+
+def workspace(action: Literal["list", "switch", "move_window"] = "list", number: int | None = None,
+              window: str = "") -> dict | str:
+    """Workspaces (numbered from 1): list them, switch to one, or move a window to one."""
+    d, X, protocol = _x()
+    try:
+        root = d.screen().root
+        count = (_prop(d, root, "_NET_NUMBER_OF_DESKTOPS") or [1])[0]
+        cur = (_prop(d, root, "_NET_CURRENT_DESKTOP") or [0])[0]
+        if action == "list":
+            per: dict[int, list[str]] = {}
+            for wid in _prop(d, root, "_NET_CLIENT_LIST") or []:
+                w = d.create_resource_object("window", wid)
+                try:
+                    desk = (_prop(d, w, "_NET_WM_DESKTOP") or [0])[0]
+                    per.setdefault(int(desk) + 1, []).append(_title(d, w)[:50])
+                except Exception:
+                    continue
+            return {"current": cur + 1, "count": count,
+                    "windows": {str(k): v for k, v in sorted(per.items()) if k <= count}}
+        if number is None or not 1 <= number <= max(count, 1) + (1 if action == "move_window" else 0):
+            raise ToolError(f"number must be 1..{count}.")
+        if action == "switch":
+            _send(d, X, protocol, root, "_NET_CURRENT_DESKTOP", [number - 1, X.CurrentTime])
+            return f"Switched to workspace {number}."
+        if not window:
+            raise ToolError("move_window needs window=<id or title part>.")
+        target = _find(d, window)
+        _send(d, X, protocol, d.create_resource_object("window", int(target["id"], 16)), "_NET_WM_DESKTOP",
+              [number - 1, 2])
+        return f"Moved '{target['title'][:60]}' to workspace {number}."
+    finally:
+        d.close()
