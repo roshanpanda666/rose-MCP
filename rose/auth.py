@@ -248,8 +248,13 @@ class RoseOAuthProvider:
         with _lock:
             s = load_state()
             if s["refresh"].pop(_h(refresh_token.token), None) is None:  # rotate: old one is single-use
+                # Logged (client label only, never the token): a reused refresh token forces the client to sign in
+                # again, so this line explains a "something went wrong, sign in again" in Claude.
+                print(f"ROSE auth: refresh token REUSED by {client_label(client.client_id)}: client must sign in again",
+                      file=sys.stderr, flush=True)
                 raise TokenError(error="invalid_grant", error_description="Refresh token already used")
             save_state(s)
+        print(f"ROSE auth: refreshed tokens for {client_label(client.client_id)}", file=sys.stderr, flush=True)
         return self._issue(client.client_id, scopes or refresh_token.scopes, refresh_token.resource)
 
     async def load_access_token(self, token: str) -> AccessToken | None:

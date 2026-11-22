@@ -44,7 +44,8 @@ KIND = {
     **dict.fromkeys(("ui_list", "ui_read", "ui_click", "ui_fill", "browser_read", "browser_tabs", "browser_status",
                      "browser_click", "browser_fill", "browser_press", "list_windows"), "tree"),
     "take_screenshot": "screenshot",
-    **dict.fromkeys(("mouse_click", "scroll"), "coords"),
+    **dict.fromkeys(("mouse_click", "mouse_move", "scroll"), "coords"),
+    "click_on_screen": "tree",  # located by tree/OCR, not guessed pixels
     **dict.fromkeys(("type_text", "press_keys"), "keys"),
 }
 

@@ -172,6 +172,19 @@ def test_enter_needs_confirm(no_commands):
     assert no_commands == [["xdotool", "key", "--clearmodifiers", "ctrl+l"]]
 
 
+def test_key_names_are_normalized_and_unknown_ones_refused(no_commands, monkeypatch):
+    known = {"Return", "Escape", "BackSpace", "Page_Down", "F5", "l", "Up"}
+    monkeypatch.setattr(input, "_keysym_known", lambda name: name in known)
+    with pytest.raises(ToolError, match="confirm=true"):
+        input.press_keys("Enter")  # alias of Return still needs confirm
+    input.press_keys("Enter ctrl+ESC backspace pagedown f5 ArrowUp", confirm=True)
+    assert [c[-1] for c in no_commands] == ["Return", "ctrl+Escape", "BackSpace", "Page_Down", "F5", "Up"]
+    no_commands.clear()
+    with pytest.raises(ToolError, match="Unknown key 'Foo'"):
+        input.press_keys("ctrl+l Foo")
+    assert no_commands == []  # nothing pressed when any key in the sequence is unknown
+
+
 # ---------------- FreeLLMAPI bridge ----------------
 
 

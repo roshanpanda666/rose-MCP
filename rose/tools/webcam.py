@@ -40,6 +40,12 @@ def webcam_capture(device: str = "") -> str:
         raise ToolError(f"{device} is not a capture device. Cameras: {cams}")
     WEBCAM_DIR.mkdir(parents=True, exist_ok=True)
     out = WEBCAM_DIR / f"webcam-{datetime.now():%Y%m%d-%H%M%S}.jpg"
+    from rose.tools import motion
+
+    if motion._active() and LIVE_FILE.exists():  # the watch holds the camera: save its current frame
+        out.write_bytes(LIVE_FILE.read_bytes())
+        notify_desktop("ROSE used the webcam", f"{cams[device]} -> {out.name}", urgency="low")
+        return str(out)
     # Skip the first ~1s of frames so auto-exposure/white balance can settle.
     base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2"]
     tail = ["-i", device, "-vf", "select=gte(n\\,20)", "-frames:v", "1", "-q:v", "3", "-y", str(out)]
@@ -60,6 +66,7 @@ def webcam_capture(device: str = "") -> str:
 
 LIVE_UNIT = "rose-webcam-live"
 LIVE_FILE = WEBCAM_DIR / ".live.jpg"
+LIVE_DEVICE = WEBCAM_DIR / ".live-device"  # which camera the running live view uses (to switch cameras)
 LIVE_SECONDS = 60
 
 
@@ -87,8 +94,22 @@ def webcam_live_frame(device: str = "") -> list:
     WEBCAM_DIR.chmod(0o700)
     stamp = WEBCAM_DIR / ".live-last-request"
     stamp.touch()
-    if not _live_active():
+    from rose.tools import motion
+
+    if motion._active():
+        pass  # the motion watch already streams the camera into LIVE_FILE
+    else:
+        if _live_active() and LIVE_DEVICE.exists() and LIVE_DEVICE.read_text().strip() != device:
+            from rose.common import systemctl_user
+
+            systemctl_user("stop", LIVE_UNIT)  # switching cameras: restart the stream on the new one
+            for _ in range(20):
+                if not _live_active():
+                    break
+                time.sleep(0.1)
+    if not motion._active() and not _live_active():
         LIVE_FILE.unlink(missing_ok=True)
+        LIVE_DEVICE.write_text(device)
         # The service stops itself: ffmpeg runs at most LIVE_SECONDS; the client keeps it alive by asking again.
         run(["systemd-run", "--user", "--collect", f"--unit={LIVE_UNIT}", "--property=KillSignal=SIGINT",
              "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-video_size", "640x480", "-i", device,
@@ -103,7 +124,13 @@ def webcam_live_frame(device: str = "") -> list:
     else:
         raise ToolError("The webcam didn't send a picture (is another app using it?).")
     data = LIVE_FILE.read_bytes()
-    return [json.dumps({"camera": cams[device], "age_s": round(time.time() - LIVE_FILE.stat().st_mtime, 2)}),
+    shown = device
+    if motion._active():  # the watch's camera is what's on screen; it can't switch until the watch stops
+        try:
+            shown = json.loads(motion.STATE.read_text()).get("device") or device
+        except (OSError, ValueError):
+            pass
+    return [json.dumps({"camera": cams.get(shown, cams[device]), "device": shown, "age_s": round(time.time() - LIVE_FILE.stat().st_mtime, 2)}),
             Image(data=data, format="jpeg")]
 
 
@@ -111,6 +138,10 @@ def webcam_live_stop() -> str:
     """Stop the webcam live view and delete its frame."""
     from rose.common import systemctl_user
 
+    from rose.tools import motion
+
+    if motion._active():
+        return "Live view closed. The motion watch keeps the camera on (motion_watch_stop turns it off)."
     was = _live_active()
     if was:
         systemctl_user("stop", LIVE_UNIT)

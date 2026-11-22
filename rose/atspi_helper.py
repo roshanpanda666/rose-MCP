@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """AT-SPI helper, run with the *system* Python (which has python3-gi + Atspi). ROSE's own venv calls
-it as a subprocess: reads a JSON request on stdin, prints a JSON reply.
+it as a subprocess: reads a JSON request on stdin, prints a JSON reply. With `--serve` it stays up and
+answers one JSON request per line (ROSE keeps one running to skip start-up cost on every call).
 
 Requests:
   {"op": "apps"}
@@ -98,11 +99,14 @@ def find_window(query):
     q = (query or "").lower()
     desk = Atspi.get_desktop(0)
     best = None
+    empty_match = None  # an app that matches but exposes no window (yet)
     for i in range(desk.get_child_count()):
         app = desk.get_child_at_index(i)
         if app is None:
             continue
         appname = _name(app).lower()
+        if q and (q == appname or q in appname) and app.get_child_count() == 0:
+            empty_match = _name(app)
         for j in range(app.get_child_count()):
             w = app.get_child_at_index(j)
             if w is None:
@@ -112,6 +116,10 @@ def find_window(query):
                 st = _states(w)
                 if best is None or st.get("showing"):
                     best = (w, _name(app), _name(w))
+    if best is None and empty_match:
+        # Chromium/Electron build their tree lazily: right after start (or before the window was used) the app
+        # is registered with no windows. The caller retries for a few seconds.
+        raise LookupError(f"NOT_READY: '{empty_match}' is running but its window isn't in the accessibility tree yet.")
     if best is None:
         raise LookupError(f"No accessible window matches '{query}'. Apps: " +
                           ", ".join(sorted({_name(desk.get_child_at_index(i)) for i in range(desk.get_child_count())
@@ -119,7 +127,9 @@ def find_window(query):
     return best
 
 
-def walk(node, path, out, limit, depth=0):
+def walk(node, path, out, limit, depth=0, visible_only=False):
+    """Depth-first (path, element) pairs. visible_only skips the subtrees of elements that aren't
+    showing (hidden tabs, collapsed panels): about half of a big Electron tree, never listed anyway."""
     if len(out) >= limit or depth > 40:
         return
     try:
@@ -135,7 +145,9 @@ def walk(node, path, out, limit, depth=0):
             continue
         p = f"{path}.{i}" if path else str(i)
         out.append((p, c))
-        walk(c, p, out, limit, depth + 1)
+        if visible_only and not _states(c).get("showing", True):
+            continue
+        walk(c, p, out, limit, depth + 1, visible_only)
 
 
 def by_path(root, path):
@@ -172,7 +184,7 @@ def resolve(root, element, any_role=False):
 def do_list(req):
     w, app, title = find_window(req["window"])
     nodes = []
-    walk(w, "", nodes, 4000)
+    walk(w, "", nodes, 4000, visible_only=True)
     items = []
     for p, n in nodes:
         r = _role(n)
@@ -316,14 +328,82 @@ def do_focused(req):
     return {"app": None, "window": None, "element": None}
 
 
-def main():
-    req = json.loads(sys.stdin.read())
+def do_boxes(req):
+    """Named, showing elements of the active window (or `window`) with their screen centre, for click_on_screen."""
+    if req.get("all"):  # every window that is on screen (not minimized), e.g. a player on the other monitor
+        desk = Atspi.get_desktop(0)
+        wins = []
+        for i in range(desk.get_child_count()):
+            app = desk.get_child_at_index(i)
+            for j in range(app.get_child_count() if app else 0):
+                w = app.get_child_at_index(j)
+                if w is not None and _states(w).get("showing"):
+                    wins.append((app, w))
+    else:
+        wins = list(_active_windows(req.get("window", "")))[:1]
+    if not wins:
+        return {"elements": []}
+    out = []
+    for app, w in wins:
+        out += _boxes_of(app, w)
+    return {"elements": out}
+
+
+def _boxes_of(app, w):
+    nodes = []
+    walk(w, "", nodes, 4000, visible_only=True)
+    out = []
+    for p, n in nodes:
+        nm = _name(n)
+        if not nm or len(nm) > 120:
+            continue
+        try:
+            ext = n.get_extents(Atspi.CoordType.SCREEN)
+        except Exception:
+            continue
+        if ext.width < 4 or ext.height < 4 or not _states(n).get("showing", True):
+            continue
+        out.append({"id": "#" + p, "role": _role(n), "name": nm, "x": ext.x + ext.width // 2, "y": ext.y + ext.height // 2,
+                    "w": ext.width, "h": ext.height, "actionable": _role(n) in ACTIONABLE, "window": _name(w)[:60]})
+    return out
+
+
+OPS = {"list": do_list, "read": do_read, "click": do_click, "set_text": do_set_text, "focus": do_focus,
+       "focused": do_focused, "boxes": do_boxes}
+
+
+def handle(req):
     try:
-        fn = {"list": do_list, "read": do_read, "click": do_click, "set_text": do_set_text,
-              "focus": do_focus, "focused": do_focused}[req["op"]]
-        print(json.dumps({"ok": True, **fn(req)}))
+        return json.dumps({"ok": True, **OPS[req["op"]](req)})
     except Exception as e:
-        print(json.dumps({"ok": False, "error": f"{e}"}))
+        return json.dumps({"ok": False, "error": f"{e}"})
+
+
+def serve():
+    """Long-lived mode (`--serve`): one JSON request per stdin line, one JSON reply per stdout line.
+    Saves the interpreter + gi start-up and the app enumeration on every call. Pending AT-SPI events are
+    dispatched before each request so the client-side cache follows the live UI."""
+    from gi.repository import GLib
+
+    ctx = GLib.MainContext.default()
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        while ctx.pending():
+            ctx.iteration(False)
+        try:
+            req = json.loads(line)
+        except ValueError as e:
+            print(json.dumps({"ok": False, "error": f"bad request: {e}"}), flush=True)
+            continue
+        print(handle(req), flush=True)
+
+
+def main():
+    if "--serve" in sys.argv[1:]:
+        serve()
+    else:
+        print(handle(json.loads(sys.stdin.read())))
 
 
 if __name__ == "__main__":

@@ -298,8 +298,11 @@ def screen_frame(monitor: int | None = None, max_side: int = 1280, quality: int 
     """Live-view frame: JPEG of the active window's monitor (monitor=N, or -1 for all), no file, no OCR."""
     from mcp.server.mcpserver import Image
 
-    max_side = max(320, min(int(max_side), 1920))
-    quality = max(30, min(int(quality), 90))
+    from rose.config import load_config
+
+    cfg = load_config()  # floors: the phone app asks for small, soft frames; the server sharpens them
+    max_side = max(320, min(max(int(max_side), int(cfg.get("live_view_min_side", 1920))), 1920))
+    quality = max(30, min(max(int(quality), int(cfg.get("live_view_min_quality", 75))), 90))
     img = _grab_x11()
     if img is None:  # Wayland / no XCB: fall back to a regular capture
         img = _open(take_screenshot())
@@ -314,9 +317,13 @@ def screen_frame(monitor: int | None = None, max_side: int = 1280, quality: int 
     else:
         img = img.copy()
     full_w, full_h = img.size
-    img.thumbnail((max_side, max_side))
+    if max(full_w, full_h) > max_side:  # native size: no resampling at all (sharpest and fastest)
+        from PIL import Image as PILModule
+
+        img.thumbnail((max_side, max_side), PILModule.Resampling.LANCZOS)
     buf = BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
+    # 4:4:4 chroma: no colour smearing on text and thin UI lines (JPEG's default 4:2:0 blurs them)
+    img.save(buf, format="JPEG", quality=quality, subsampling=0)
     meta = {"offset_x": ox, "offset_y": oy, "scale": round(full_w / img.width, 5), "width": img.width,
             "height": img.height, "screen_width": full_w, "screen_height": full_h, "area": label}
     import json

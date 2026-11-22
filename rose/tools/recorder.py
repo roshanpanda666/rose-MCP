@@ -122,7 +122,7 @@ def _sources() -> list[dict]:
     except ToolError:
         default = ""
     return [{"name": s["name"], "description": s.get("description") or s["name"], "default": s["name"] == default}
-            for s in data if not _is_monitor(s)]  # real microphones only
+            for s in data if not _is_monitor(s) and not s["name"].startswith(EC_PREFIX)]  # real microphones only
 
 
 def _listening(port: int) -> bool:
@@ -143,7 +143,39 @@ def mic_sources() -> list[dict]:
     return mics
 
 
-def mic_live_start(source: str = "") -> dict:
+# Echo cancelling while listening: PipeWire's echo-cancel module, loaded only for the listening session.
+# Sound played into EC_SINK (the phone app's talk-live voice and spoken text) is removed from the mic, so the
+# phone doesn't hear itself back. Other laptop audio (music, calls) still reaches the mic as usual. The default
+# speaker and mic don't change; the module is unloaded when listening stops (ExecStopPost) or on the next start.
+EC_PREFIX = "rose_ec"
+EC_SOURCE, EC_SINK = "rose_ec_source", "rose_ec_sink"
+
+
+def _ec_unload() -> None:
+    try:
+        mods = run_text(["pactl", "list", "short", "modules"])
+    except ToolError:
+        return
+    for line in mods.splitlines():
+        parts = line.split("\t")
+        if len(parts) > 2 and "module-echo-cancel" in parts[1] and f"source_name={EC_SOURCE}" in parts[2]:
+            run(["pactl", "unload-module", parts[0]], timeout=10)
+
+
+def _ec_load(mic: str) -> str | None:
+    """Load the echo canceller on `mic`; its module id, or None if it isn't available."""
+    _ec_unload()
+    try:
+        sink = run_text(["pactl", "get-default-sink"]).strip()
+        mod = run_text(["pactl", "load-module", "module-echo-cancel", "aec_method=webrtc",
+                        f"source_name={EC_SOURCE}", f"sink_name={EC_SINK}", f"source_master={mic}",
+                        f"sink_master={sink}"], timeout=10).strip()
+    except ToolError:
+        return None
+    return mod if mod.isdigit() else None
+
+
+def mic_live_start(source: str = "", echo_cancel: bool = True) -> dict:
     """Start live listening to a laptop mic (name from mic_sources; empty = default). Laptop is notified."""
     if not shutil.which("ffmpeg"):
         raise ToolError("ffmpeg is not installed (sudo apt install ffmpeg).")
@@ -154,8 +186,14 @@ def mic_live_start(source: str = "") -> dict:
         raise ToolError(f"No microphone named {source!r}. Use mic_sources.")
     if systemctl_user("is-active", LISTEN_UNIT) == "active":
         run(["systemctl", "--user", "stop", LISTEN_UNIT], timeout=10)
+    capture, cleanup = mic["name"], []
+    mod = _ec_load(mic["name"]) if echo_cancel and shutil.which("pactl") else None
+    if mod:
+        capture = EC_SOURCE
+        cleanup = [f"--property=ExecStopPost={shutil.which('pactl')} unload-module {mod}"]
     run(["systemd-run", "--user", "--collect", f"--unit={LISTEN_UNIT}", f"--property=RuntimeMaxSec={LISTEN_MAX_SECONDS}",
-         "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", mic["name"], "-ac", "1", "-ar", "48000",
+         *cleanup,
+         "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", capture, "-ac", "1", "-ar", "48000",
          "-c:a", "libopus", "-b:a", "48k", "-application", "voip", "-f", "webm", "-live", "1",
          "-cluster_time_limit", "500", "-listen", "1", f"http://127.0.0.1:{LISTEN_PORT}/live.webm"])
     deadline = time.monotonic() + 5
@@ -165,16 +203,20 @@ def mic_live_start(source: str = "") -> dict:
         time.sleep(0.1)
     else:
         run(["systemctl", "--user", "stop", LISTEN_UNIT], timeout=10)
+        _ec_unload()
         raise ToolError("The microphone stream didn't start (is the mic in use or muted?).")
     notify_desktop("ROSE: someone is listening through the microphone", mic["description"], urgency="critical")
     return {"stream": f"http://127.0.0.1:{LISTEN_PORT}/live.webm", "source": mic["name"],
-            "description": mic["description"], "max_minutes": LISTEN_MAX_SECONDS // 60}
+            "description": mic["description"], "max_minutes": LISTEN_MAX_SECONDS // 60,
+            "echo_cancel": bool(mod), "play_to": EC_SINK if mod else ""}
 
 
 def mic_live_stop() -> str:
     """Stop live listening."""
     if systemctl_user("is-active", LISTEN_UNIT) != "active":
+        _ec_unload()
         return "Live listening wasn't running."
     run(["systemctl", "--user", "stop", LISTEN_UNIT], timeout=10)
+    _ec_unload()
     notify_desktop("ROSE stopped listening", "", urgency="low")
     return "Stopped listening."

@@ -19,6 +19,7 @@ it can do:
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import inspect
 import json
@@ -49,13 +50,14 @@ UNTRUSTED_TOOLS = {
     "github_my_prs", "github_pr_status", "github_ci_runs", "github_notifications", "list_windows",
     "media_control", "wifi_networks", "bluetooth_devices", "run_command", "take_screenshot", "webcam_capture",
     "list_apps", "audio_devices", "ui_list", "ui_read", "browser_read", "browser_tabs", "browser_status",
+    "browser_bookmarks",
     "schedule_list", "watch_status", "freellm_ask", "freellm_web_search", "screen_frame", "phone_screenshot",
-    "workspace", "webcam_live_frame",
+    "workspace", "webcam_live_frame", "motion_events",
 }
 
 # Mouse/keyboard control from a remote client needs approval, because a click can press "Send"
 # without any confirm step.
-GUI_TOOLS = {"mouse_click", "scroll", "type_text", "press_keys", "ui_click", "ui_fill",
+GUI_TOOLS = {"mouse_click", "mouse_move", "click_on_screen", "scroll", "type_text", "press_keys", "ui_click", "ui_fill",
              "browser_click", "browser_fill", "browser_press",
              # the phone (ADB): taps and typing can send messages; connecting grants control
              "phone_connect", "phone_tap", "phone_swipe", "phone_type", "phone_key", "phone_open_app"}
@@ -63,7 +65,7 @@ GUI_TOOLS = {"mouse_click", "scroll", "type_text", "press_keys", "ui_click", "ui
 # until it expires, that client's actions don't ask again. Other clients still need their own approval.
 GRANT_FILE = ROSE_HOME / "approval_grant.json"
 # Always approval-gated for remote clients, whatever approval_required_tools says (camera access).
-ALWAYS_APPROVE = {"webcam_capture", "webcam_live_frame", "mic_live_start"}
+ALWAYS_APPROVE = {"webcam_capture", "webcam_live_frame", "mic_live_start", "motion_watch_start"}
 
 # Typical prompt-injection phrasing. A hit is a warning sign, not proof (and a miss proves nothing).
 INJECTION_PATTERNS = [
@@ -96,6 +98,15 @@ def caller() -> str:
         return c()
     except Exception:
         return "?"
+
+
+# While the approval page runs a parked call, the client that asked for it (not the approver's page).
+_acting_for: contextvars.ContextVar[str | None] = contextvars.ContextVar("rose_acting_for", default=None)
+
+
+def effective_caller() -> str:
+    """The client a tool call runs for: the original requester during an approved call, else caller()."""
+    return _acting_for.get() or caller()
 
 
 def is_remote(who: str) -> bool:
@@ -273,11 +284,14 @@ def approve(aid: str, passphrase: str) -> dict:
         args["confirm"] = True
     if "wait" in params:
         args["wait"] = 0  # don't hold the approval page; the caller collects results via check_approval
+    token = _acting_for.set(rec["caller"])
     try:
         result = fn(**args)
         rec["status"], rec["result"] = "done", _text_of(result)[:4000]
     except Exception as e:
         rec["status"], rec["result"] = "failed", f"{type(e).__name__}: {e}"
+    finally:
+        _acting_for.reset(token)
     rec["finished"] = time.time()
     _save(rec)
     _log({"event": "approval_granted", "tool": rec["tool"], "caller": rec["caller"], "status": rec["status"]})

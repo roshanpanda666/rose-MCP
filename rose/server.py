@@ -29,8 +29,8 @@ from rose import watch  # noqa: E402
 from rose.common import logged  # noqa: E402
 from rose.config import load_config  # noqa: E402
 from rose.tools import (  # noqa: E402
-    apps, bridge, browser, clipboard, device, files, forge, freellm, github, input, notify, phone, power, quick,
-    recorder, screenshot, system, ui, webcam,
+    apps, bridge, browser, clipboard, device, files, forge, freellm, github, input, motion, notify, phone, pointer, power,
+    quick, recorder, screenshot, system, ui, webcam,
 )
 
 INSTRUCTIONS = (
@@ -38,13 +38,17 @@ INSTRUCTIONS = (
     "1. A dedicated tool (quick settings, media, audio, Bluetooth, Wi-Fi, apps/URLs/windows, clipboard, files, "
     "GitHub, system_status, schedules...).\n"
     "2. run_command with a preset (list_commands).\n"
-    "3. Apps and web pages, TREE-FIRST: observe with ui_list/ui_read or ROSE's browser (browser_*; own "
+    "WEB: use the user's signed-in Brave, not ROSE's browser. Open sites with open_url (browser_bookmarks lists "
+    "saved tabs), read/act on the Brave window with ui_read/ui_click, close its active tab with "
+    "press_keys('ctrl+w', window='Brave'). browser_* is ROSE's own profile (NOT signed in): only if the user asks.\n"
+    "3. To click something you can see (button, link, tab, menu): click_on_screen(target='its visible text'): ROSE finds the exact spot (tree, then OCR); never guess pixel coordinates from a screenshot. find_on_screen just locates. mouse_click(x, y) only when there's no text to aim at.\n"
+    "4. Apps and web pages, TREE-FIRST: observe with ui_list/ui_read or ROSE's browser (browser_*; own "
     "profile), act by name with ui_click/ui_fill/browser_click/browser_fill (never pixels), then READ BACK "
     "(ui_read/browser_read) and check the text landed in the right element and window. Prefer ui_fill over "
     "type_text; with type_text/press_keys pass window= so ROSE focus-verifies. On a failed read-back, undo if "
     "possible (ctrl+z, never in a terminal). Empty tree in a Chromium/Electron app: ui_enable_app_accessibility, "
     "ask before restarting the app.\n"
-    "4. take_screenshot only as fallback (no tree, unexplained read-back failure, or a visual question); "
+    "5. take_screenshot only as fallback (no tree, unexplained read-back failure, or a visual question); "
     "include_image=false when OCR text is enough.\n"
     "Files: only inside list_allowed_dirs. Destructive, sending/submitting or network-cutting actions "
     "(Wi-Fi off, airplane, network switch, stopping processes, overwriting files, closing windows, Enter) need "
@@ -116,6 +120,9 @@ def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
         (take_screenshot, WRITES),
         (list_monitors, READ_ONLY),
         (input.mouse_click, WRITES),
+        (input.mouse_move, WRITES),
+        (pointer.click_on_screen, WRITES),
+        (pointer.find_on_screen, READ_ONLY),
         (input.scroll, WRITES),
         (input.type_text, WRITES),
         (input.press_keys, WRITES),
@@ -168,6 +175,7 @@ def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
         (browser.browser_start, WRITES),
         (browser.browser_status, READ_ONLY),
         (browser.browser_tabs, READ_ONLY),
+        (browser.browser_bookmarks, READ_ONLY),
         (browser.browser_open, WRITES),
         (browser.browser_read, READ_ONLY),
         (browser.browser_click, WRITES),
@@ -211,6 +219,9 @@ def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
         (recorder.mic_sources, READ_ONLY),
         (recorder.mic_live_start, WRITES),
         (recorder.mic_live_stop, WRITES),
+        (motion.motion_watch_start, WRITES),
+        (motion.motion_events, WRITES),
+        (motion.motion_watch_stop, WRITES),
     ]
 
 
@@ -388,8 +399,10 @@ def run_http(port: int | None = None) -> None:
     app = build_http_app(public_url, port)
     print(f"ROSE HTTP on 127.0.0.1:{port} (public URL {public_url}/mcp)", file=sys.stderr)
     # Loopback only: the tunnel is the only way in from outside.
+    # timeout_graceful_shutdown: Claude keeps long-lived streaming connections open; without a limit a restart
+    # waited on them until systemd killed ROSE 90 s later (and every call failed meanwhile). Clients reconnect.
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", proxy_headers=True,
-                forwarded_allow_ips="127.0.0.1")
+                forwarded_allow_ips="127.0.0.1", timeout_graceful_shutdown=5)
 
 
 def main() -> None:

@@ -59,6 +59,8 @@ DEFAULT_CONFIG = {
     "max_output_chars": 12000,
     "large_output_chars": 4000,
     "disabled_tools": [],
+    "live_view_min_side": 1920,
+    "live_view_min_quality": 75,
     "commands": {},
 }
 
@@ -95,6 +97,8 @@ _COMMENTS = {
     "max_output_chars": "Cap on the text a tool returns to the model (longer output is cut with a note; 0 = no cap)",
     "large_output_chars": "Log tool outputs bigger than this to ~/rose/logs/output-*.jsonl (see `rose tokens`)",
     "disabled_tools": 'Tools ROSE should not offer at all, e.g. ["webcam_capture", "lock_screen"]',
+    "live_view_min_side": "Live screen view (screen_frame): frames are at least this many px on the long side (1920 = native, sharpest)",
+    "live_view_min_quality": "Live screen view: minimum JPEG quality (30-90; higher = sharper text, bigger frames)",
     "commands": ('Command presets Rose can run by name (no shell, no arguments), e.g.\n'
                  '# notes-pull = ["git", "-C", "~/notes", "pull"]\n# disk = ["df", "-h", "/"]'),
 }

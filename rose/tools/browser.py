@@ -22,6 +22,12 @@ from rose.common import ToolError, display_env
 from rose.config import load_config
 
 PROFILE = Path.home() / ".config" / "rose-browser"
+# The user's everyday browser profiles (read-only: ROSE only reads their saved bookmarks).
+MAIN_PROFILES = [
+    Path.home() / ".config" / "BraveSoftware" / "Brave-Browser" / "Default",
+    Path.home() / ".config" / "google-chrome" / "Default",
+    Path.home() / ".config" / "chromium" / "Default",
+]
 _ids = count(1)
 
 # Fixed page scripts. Inputs are injected with json.dumps, so they're always JS string literals.
@@ -109,7 +115,7 @@ def _check_url(url: str) -> str:
 
 
 def browser_start(url: str = "") -> str:
-    """Start ROSE's own browser (separate profile; log in there once to sites ROSE should use)."""
+    """Start ROSE's own browser (separate profile, NOT signed in). Only if the user asks; otherwise use open_url (their Brave)."""
     if _running():
         if url:
             return browser_open(url)
@@ -272,3 +278,36 @@ def browser_status() -> dict:
     if not _running():
         return {"running": False, "how": "browser_start opens it (separate profile; log in there once)."}
     return {"running": True, "profile": str(PROFILE), "tabs": browser_tabs()}
+
+
+def _bookmarks_file() -> Path:
+    custom = load_config().get("bookmarks_profile") or ""
+    for d in ([Path(custom).expanduser()] if custom else []) + MAIN_PROFILES:
+        if (d / "Bookmarks").is_file():
+            return d / "Bookmarks"
+    raise ToolError("No browser bookmarks found. Set bookmarks_profile in ROSE's config to your browser profile folder.")
+
+
+def _flatten(nodes: list, folder: str = "") -> list[dict]:
+    out = []
+    for n in nodes:
+        if n.get("type") == "url":
+            item = {"name": n.get("name", "")[:100], "url": n.get("url", "")[:300]}
+            if folder:
+                item["folder"] = folder
+            out.append(item)
+        elif n.get("type") == "folder":
+            out += _flatten(n.get("children", []), f"{folder}/{n.get('name', '')}".strip("/"))
+    return out
+
+
+def browser_bookmarks(include_other: bool = False) -> list[dict]:
+    """The user's saved bookmarks (bookmarks bar) from their main browser, read-only. Use for 'saved tabs/sites'; open one with open_url."""
+    try:
+        roots = json.loads(_bookmarks_file().read_text(encoding="utf-8")).get("roots", {})
+    except (OSError, ValueError) as e:
+        raise ToolError(f"Couldn't read the browser's bookmarks: {e}") from e
+    items = _flatten(roots.get("bookmark_bar", {}).get("children", []))
+    if include_other:
+        items += _flatten(roots.get("other", {}).get("children", []), "Other bookmarks")
+    return items

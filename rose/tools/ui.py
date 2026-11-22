@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import select
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -29,8 +31,18 @@ CHROMIUM_LIKE = ("brave", "chrome", "chromium", "code", "visual studio code", "v
                  "electron", "teams", "signal", "obsidian", "spotify", "element", "whatsapp", "notion", "cursor")
 
 
-def _call(req: dict, timeout: float = 20) -> dict:
-    """Run one request through the AT-SPI helper (system Python) and return its reply."""
+def _parse(stdout: str, stderr: str = "") -> dict:
+    try:
+        out = json.loads(stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise ToolError(f"Accessibility helper failed: {(stderr or stdout)[-300:]}") from None
+    if not out.pop("ok"):
+        raise ToolError(out["error"])
+    return out
+
+
+def _call_once(req: dict, timeout: float = 20) -> dict:
+    """One request in a fresh helper process (slower: interpreter + gi start-up every time)."""
     try:
         p = subprocess.run([SYSTEM_PY, str(HELPER)], input=json.dumps(req), capture_output=True, text=True,
                            timeout=timeout, env=display_env())
@@ -38,13 +50,99 @@ def _call(req: dict, timeout: float = 20) -> dict:
         raise ToolError("The app didn't answer accessibility queries in time (it may be busy or frozen).") from None
     except FileNotFoundError:
         raise ToolError(f"{SYSTEM_PY} not found: ui_* tools need the system Python with python3-gi.") from None
+    return _parse(p.stdout, p.stderr)
+
+
+class _Helper:
+    """One long-lived `atspi_helper.py --serve` process shared by all ui_* calls (requests serialized).
+    Saves ~90 ms of start-up and ~150 ms of app enumeration per call. Restarted if it dies or hangs,
+    and recycled every RECYCLE requests to keep its memory bounded."""
+
+    RECYCLE = 500
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen | None = None
+        self.served = 0
+        self.lock = threading.Lock()
+
+    def _stop(self) -> None:
+        if self.proc is not None:
+            with contextlib.suppress(Exception):
+                self.proc.kill()
+                self.proc.wait(timeout=2)
+        self.proc = None
+
+    def _start(self) -> subprocess.Popen:
+        if self.proc is None or self.proc.poll() is not None or self.served >= self.RECYCLE:
+            self._stop()
+            self.proc = subprocess.Popen([SYSTEM_PY, str(HELPER), "--serve"], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                         bufsize=1, env=display_env())
+            self.served = 0
+        return self.proc
+
+    def _ask(self, req: dict, timeout: float) -> str | None:
+        """The reply line, or None if the process is gone (caller restarts). Raises on timeout."""
+        proc = self._start()
+        try:
+            proc.stdin.write(json.dumps(req) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            return None
+        ready, _, _ = select.select([proc.stdout], [], [], timeout)
+        if not ready:
+            self._stop()  # a hung app blocks the helper; never reuse it
+            raise ToolError("The app didn't answer accessibility queries in time (it may be busy or frozen).")
+        line = proc.stdout.readline()
+        if not line:
+            return None
+        self.served += 1
+        return line
+
+    def call(self, req: dict, timeout: float) -> dict:
+        with self.lock:
+            line = self._ask(req, timeout)
+            if line is None:  # helper died (or was recycled mid-way): one fresh try
+                self._stop()
+                line = self._ask(req, timeout)
+            if line is None:
+                self._stop()
+                raise OSError("persistent accessibility helper unavailable")
+        return _parse(line)
+
+
+_helper = _Helper()
+
+
+def _call(req: dict, timeout: float = 20) -> dict:
+    """Run one request through the AT-SPI helper (system Python) and return its reply.
+    Waits up to ~3 s for an app that is running but hasn't exposed its window yet (Chromium/Electron)."""
+    for attempt in range(7):
+        try:
+            return _call_inner(req, timeout)
+        except ToolError as e:
+            if "NOT_READY:" not in str(e):
+                raise
+            if attempt == 6:
+                app = str(e).split("NOT_READY:", 1)[1].strip()
+                raise ToolError(f"{app} Make sure it was started with --force-renderer-accessibility (Brave/Chrome) "
+                                "or call ui_enable_app_accessibility; then try again.") from None
+            time.sleep(0.5)
+    raise AssertionError("unreachable")
+
+
+def _call_inner(req: dict, timeout: float) -> dict:
     try:
-        out = json.loads(p.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        raise ToolError(f"Accessibility helper failed: {(p.stderr or p.stdout)[-300:]}") from None
-    if not out.pop("ok"):
-        raise ToolError(out["error"])
-    return out
+        return _helper.call(req, timeout)
+    except FileNotFoundError:
+        raise ToolError(f"{SYSTEM_PY} not found: ui_* tools need the system Python with python3-gi.") from None
+    except OSError:
+        return _call_once(req, timeout)  # persistent mode broken: fall back to one process per call
+    except ToolError as e:
+        if "No accessible window" not in str(e):
+            raise
+        # Belt and braces against a stale cache in the long-lived helper: confirm with a fresh process.
+        return _call_once(req, timeout)
 
 
 def _a11y_enabled() -> bool | None:
@@ -66,9 +164,9 @@ def _empty_tree_hint(window: str, app: str = "") -> str:
                     "ui_enable_app_accessibility, ask the user before restarting the app (it may have unsaved "
                     "work), then ui_list again. Only fall back to take_screenshot if it's still empty.")
         return ("This is a Chromium/Electron app: if it was started before accessibility was turned on, it "
-                "must be restarted (ask the user first) before its tree appears. For websites, prefer ROSE's "
-                "browser (browser_read / browser_click / browser_fill). Fall back to take_screenshot only if "
-                "that's not possible.")
+                "must be restarted (ask the user first) before its tree appears; Brave needs "
+                "--force-renderer-accessibility. Websites: use the user's signed-in Brave; ROSE's own browser "
+                "(browser_*) only if the user asks. Fall back to take_screenshot only if that's not possible.")
     return ("This app exposes no usable accessibility tree (canvas app, game, remote desktop, video or no "
             "a11y support). Fall back to take_screenshot (area='active_window', include_image=false first if "
             "OCR text is enough).")
@@ -118,7 +216,7 @@ def ui_click(window: str, element: str) -> str:
         run(["xdotool", "mousemove", str(x), str(y)])
         run(["xdotool", "click", "1"])
         msg = f"Clicked {out['element']} at ({x}, {y})."
-    time.sleep(0.3)
+    time.sleep(0.15)  # let a dialog or window switch land before reporting the active window
     act = _x_active()
     if act:
         msg += f" Active window now: '{act['title'][:80]}'."

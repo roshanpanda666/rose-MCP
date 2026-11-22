@@ -25,6 +25,46 @@ from rose.tools.apps import window_matches as _matches
 _ENTER_KEYS = re.compile(r"(^|\+)(return|enter|kp_enter)$", re.IGNORECASE)
 _KEY_RE = re.compile(r"^[A-Za-z0-9_]+(\+[A-Za-z0-9_]+)*$")
 
+# Everyday key names -> X11 keysym names. xdotool silently IGNORES names it doesn't know (exit 0), so
+# "Enter" used to be reported as pressed while nothing happened.
+_KEY_ALIASES = {
+    "enter": "Return", "return": "Return", "kp_enter": "KP_Enter", "esc": "Escape", "escape": "Escape",
+    "backspace": "BackSpace", "del": "Delete", "delete": "Delete", "ins": "Insert", "insert": "Insert",
+    "pgup": "Page_Up", "pageup": "Page_Up", "page_up": "Page_Up", "pgdn": "Page_Down", "pagedown": "Page_Down",
+    "page_down": "Page_Down", "arrowup": "Up", "arrowdown": "Down", "arrowleft": "Left", "arrowright": "Right",
+    "up": "Up", "down": "Down", "left": "Left", "right": "Right", "home": "Home", "end": "End", "tab": "Tab",
+    "space": "space", "spacebar": "space", "capslock": "Caps_Lock", "printscreen": "Print", "prtsc": "Print",
+    "control": "ctrl", "win": "super", "windows": "super", "cmd": "super", "command": "super", "option": "alt",
+}
+_XDOTOOL_MODIFIERS = {"ctrl", "alt", "shift", "super", "meta"}  # xdotool's own names, not X keysyms
+
+
+def _keysym_known(name: str) -> bool | None:
+    """Does X11 know this keysym name? None if libX11 can't be loaded (then xdotool decides)."""
+    try:
+        import ctypes
+        import ctypes.util
+
+        lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("X11") or "libX11.so.6")
+        lib.XStringToKeysym.restype = ctypes.c_ulong
+        return lib.XStringToKeysym(name.encode()) != 0
+    except Exception:
+        return None
+
+
+def _normalize_keys(combo: str) -> str:
+    """'ctrl+Enter' -> 'ctrl+Return', 'f5' -> 'F5'; refuses names X11 doesn't know."""
+    parts = []
+    for part in combo.split("+"):
+        low = part.lower()
+        name = _KEY_ALIASES.get(low) or (low if low in _XDOTOOL_MODIFIERS else None) \
+            or (part.upper() if re.fullmatch(r"[fF]\d{1,2}", part) else part)
+        if name not in _XDOTOOL_MODIFIERS and _keysym_known(name) is False:
+            raise ToolError(f"Unknown key '{part}' in '{combo}'. Use X11 names like Return, Escape, BackSpace, "
+                            "Delete, Tab, Page_Down, Up, F5, ctrl+l. Nothing was pressed.")
+        parts.append(name)
+    return "+".join(parts)
+
 
 def _check() -> None:
     if session_type() != "x11":
@@ -69,6 +109,14 @@ def mouse_click(
     return f"{button.capitalize()}-clicked x{clicks} at screen ({sx}, {sy})."
 
 
+def mouse_move(x: float, y: float, coords: Literal["screenshot", "screen"] = "screenshot") -> str:
+    """Move the mouse pointer to (x, y) without clicking (hover). Screenshot-preview pixels by default."""
+    _check()
+    sx, sy = _to_screen(x, y, coords)
+    _move(sx, sy)
+    return f"Moved the mouse to screen ({sx}, {sy}). Not clicked."
+
+
 def scroll(
     x: float,
     y: float,
@@ -92,8 +140,8 @@ def _ensure_active(window: str) -> dict:
     if act and _matches(act, window):
         return act
     focus_window(window)  # raises if no/ambiguous match
-    for _ in range(5):
-        time.sleep(0.15)
+    for _ in range(15):  # poll finely: most windows activate in <100 ms (same 0.75 s ceiling as before)
+        time.sleep(0.05)
         act = _active()
         if act and _matches(act, window):
             return act
@@ -147,8 +195,14 @@ def type_text(text: str, confirm: bool = False, window: str = "", verify: bool =
         msg += (f" WARNING: the active window changed to '{after['title'][:80]}' while typing; some text may "
                 "have landed there. Check with ui_read.")
     if verify:
-        time.sleep(0.15)
-        msg += _readback(text)
+        # Read back early; only if the app hasn't shown the text yet, give it a little longer.
+        back = ""
+        for wait in (0.03, 0.15, 0.3):
+            time.sleep(wait)
+            back = _readback(text)
+            if "READ-BACK FAILED" not in back:
+                break
+        msg += back
     return msg
 
 
@@ -162,6 +216,8 @@ def press_keys(keys: str, confirm: bool = False, window: str = "") -> str:
     for p in presses:
         if not _KEY_RE.match(p):
             raise ToolError(f"Invalid key '{p}'. Use names like ctrl+l, Escape, Tab, Return, F5.")
+    presses = [_normalize_keys(p) for p in presses]  # all validated before anything is pressed
+    for p in presses:
         if _ENTER_KEYS.search(p) and not confirm:
             raise ToolError("Pressing Enter may send a message or submit something. "
                             "Ask the user, then call again with confirm=true.")
@@ -171,7 +227,7 @@ def press_keys(keys: str, confirm: bool = False, window: str = "") -> str:
         run(["xdotool", "key", "--clearmodifiers", p])
         time.sleep(0.05)
     after = _active()
-    return f"Pressed {keys}." + (f" Active window now: '{after['title'][:80]}'." if after else "")
+    return f"Pressed {' '.join(presses)}." + (f" Active window now: '{after['title'][:80]}'." if after else "")
 
 
 def mouse_position() -> str:
