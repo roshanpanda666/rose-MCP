@@ -60,6 +60,7 @@ UNTRUSTED_TOOLS = {
     "memory_search", "memory_list", "git_status", "git_diff_summary", "git_log_today", "project_logs",
     "explain_error", "claude_job_status", "activity_today", "standup", "list_projects",
     "phone_contacts", "phone_ui_list", "phone_notifications", "phone_status",
+    "today_overview", "failure_report",
 }
 
 # Mouse/keyboard control from a remote client needs approval, because a click can press "Send"

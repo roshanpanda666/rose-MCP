@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mcp.server.mcpserver import Image, MCPServer  # noqa: E402
 from mcp.types import ToolAnnotations  # noqa: E402
 
-from rose import guard, maintenance, metrics, output  # noqa: E402
+from rose import agenda, failures, guard, maintenance, metrics, output, profiles  # noqa: E402
 from rose import push as pushmod  # noqa: E402
 from rose import activity, triggers, watch  # noqa: E402
 from rose.common import logged  # noqa: E402
@@ -56,7 +56,8 @@ INSTRUCTIONS = (
     "DEV: git_diff_summary; commit: show message+diff, ask, git_commit(confirm=true), never push. project_tasks/"
     "project_run/project_logs; explain_error; new_project; git_branch; docker (stop/restart confirm).\n"
     "FILES: copy_file, trash_file, edit_file, zip/unzip, create_folder; sort_downloads dry run first; "
-    "clipboard_history; screen_ocr; package_updates. Day: activity_today, standup.\n"
+    "clipboard_history; screen_ocr; package_updates. Day: activity_today, standup, today_overview "
+    "(calendar+email), failure_report.\n"
     "PHONE: phone_call/phone_message(X, ..., confirm=true; app='whatsapp' or 'sms'); contact as said, ask if "
     "ambiguous; message = user's words only. phone_click_text over phone_tap. send_to_phone, phone_get_files.\n"
     "MEMORY: 'remember ...' or a lasting fact the user states -> memory_save (their words only); memory_search "
@@ -282,6 +283,8 @@ def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
         (phone_files.send_to_phone, OPEN_WRITE),
         (phone_files.phone_get_files, WRITES),
         (screenshot.screen_ocr, WRITES),
+        (agenda.today_overview, OPEN_READ),
+        (failures.failure_report, READ_ONLY),
     ]
 
 
@@ -323,6 +326,7 @@ def register_tools(mcp: MCPServer) -> None:
             output.shaped(name, safe))
     for tool in mcp._tool_manager.list_tools():
         tool.parameters = compact_schema(tool.parameters)
+    profiles.apply(mcp)  # each client sees only its tool profile (default "full": every tool)
 
 
 def build_http_server(public_url: str) -> MCPServer:  # noqa: C901 (route definitions)

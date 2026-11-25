@@ -65,6 +65,7 @@ const I = {
   laptop: "M4 5h16v10H4zM2 19h20",
   automations: "M12 8v4l3 2M12 3a9 9 0 110 18 9 9 0 010-18z",
   activity: "M3 12h4l3-8 4 16 3-8h4",
+  today: "M4 6h16v14H4zM4 10h16M8 3v5M16 3v5M8 14h3",
   bridge: "M4 5h16v11H8l-4 4z",
   logs: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5",
   settings: "M12 9a3 3 0 100 6 3 3 0 000-6zM19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z",
@@ -89,7 +90,7 @@ const svg = (name) => {
 
 /* ---------------- navigation ---------------- */
 const SECTIONS = [
-  ["overview", "Overview"], ["remote", "Remote access"], ["phone", "Phone"], ["laptop", "Laptop"], ["rose", "Rose"],
+  ["overview", "Overview"], ["today", "Today"], ["remote", "Remote access"], ["phone", "Phone"], ["laptop", "Laptop"], ["rose", "Rose"],
   ["wheel", "Menu wheel"], ["automations", "Automations"], ["activity", "Activity & memory"], ["bridge", "Bridge"], ["logs", "Logs"],
   ["settings", "Settings"],
 ];
@@ -808,6 +809,38 @@ $("schAdd").onclick = async (e) => {
   const r = await act(e.target, "schedule_add", { kind, time_hhmm, text: $("schText").value, repeat: $("schRepeat").value, date: $("schDate").value });
   if (r) { toast(`Scheduled (next ${r.next_run})`, "ok"); $("schText").value = ""; loadSchedules(); }
 };
+
+/* ---------------- today: calendar + email ---------------- */
+async function loadToday(refresh = false) {
+  try {
+    const t = await api("today", { refresh }, { quiet: !refresh, timeout: 45000 });
+    $("todayDate").textContent = `${t.date} · ${t.now}`;
+    const now = t.now;
+    $("todayNext").textContent = t.next ? `Next: ${t.next.time.split("-")[0]} ${t.next.title}` : (t.events.length ? "No more meetings today." : "");
+    $("todayEvents").replaceChildren(...(t.events.length ? t.events.map((e) => {
+      const [s, en] = e.all_day ? ["", ""] : e.time.split("-");
+      const state = e.all_day ? "" : (en <= now ? "past" : (s <= now ? "now" : ""));
+      return el("li", { class: `ev ${state}` }, el("span", { class: "mono" }, e.time),
+        el("span", null, e.title, e.location ? el("div", { class: "muted small" }, e.location) : null),
+        state === "now" ? el("span", { class: "pill ok" }, "now") : null);
+    }) : [el("li", { class: "muted" }, "Nothing on the calendar today.")]));
+    $("todayUnread").textContent = t.email.length ? `${t.unread} unread of ${t.email.length}` : "";
+    $("todayMail").replaceChildren(...(t.email.length ? t.email.map((m) => el("li", { class: m.unread ? "unread" : "" },
+      el("span", { class: "mono" }, m.time), el("span", null, m.subject, el("div", { class: "muted small" }, m.from))))
+      : [el("li", { class: "muted" }, "No email today.")]));
+    $("todayNotesCard").hidden = !(t.notes || []).length;
+    $("todayNotes").replaceChildren(...(t.notes || []).map((n) => el("li", { class: "small" }, n)));
+  } catch (e) { $("todayEvents").replaceChildren(el("li", { class: "muted" }, e.message)); }
+  try {
+    const f = await api("failure_summary", { days: 7 }, { quiet: true, timeout: 30000 });
+    $("todayFailures").replaceChildren(
+      el("div", null, `${f.failed_calls} failed of ${f.rose_calls} calls · ${f.cant_replies} "I can't" shown · ${f.cant_dropped} caught and retried`),
+      ...f.top.slice(0, 6).map((x) => el("div", { class: "small" }, el("b", null, `${x.tool} ×${x.failures}`), " ", el("span", { class: "muted" }, x.error))));
+  } catch (e) { $("todayFailures").textContent = e.message; }
+}
+loaders.today = () => loadToday(false);
+$("todayRefresh").onclick = () => loadToday(true);
+setInterval(() => { if (current === "today") loadToday(false); }, 60000);
 
 /* ---------------- activity & memory ---------------- */
 async function loadActivity() {

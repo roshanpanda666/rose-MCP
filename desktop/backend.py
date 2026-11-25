@@ -1126,6 +1126,20 @@ def guard_find_hub() -> str:
     return open_url(_pg().FIND_HUB)
 
 
+def today(refresh: bool = False) -> dict:
+    """Today's calendar events and inbox (rose.agenda; set up with `rose agenda setup`)."""
+    from rose import agenda
+    return agenda.today(refresh=bool(refresh))
+
+
+def failure_summary(days: int = 7) -> dict:
+    """Failed tool calls and "I can't" replies (rose.failures)."""
+    from rose import failures
+    r = failures.report(int(days))
+    r.pop("markdown", None)
+    return r
+
+
 METHODS = {name: fn for name, fn in globals().items()
            if callable(fn) and not name.startswith("_") and getattr(fn, "__module__", "") == __name__}
 

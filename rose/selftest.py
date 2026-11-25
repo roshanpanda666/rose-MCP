@@ -16,7 +16,7 @@ from pathlib import Path
 WS_REL = "selftest"
 
 
-def run(full: bool = False, port: int | None = None) -> int:
+def run(full: bool = False, port: int | None = None, phone: bool = False) -> int:
     import anyio
     import httpx
     from mcp import ClientSession
@@ -157,7 +157,67 @@ def run(full: bool = False, port: int | None = None) -> int:
                 r = await c(tool, args)
                 rec(tool, not r.is_error, txt(r)[:120])
 
+        # ---- newer tools: safe, read-only or confined to the selftest workspace ----
+        async def ok(tool, args, check=None, soft=False):
+            if tool not in tools:
+                return None
+            r = await c(tool, args)
+            good = not r.is_error and (check is None or check(r))
+            rec(tool, good, txt(r)[:120], soft=soft and not good)
+            return r
+
+        for tool, args in [("undo_history", {}), ("list_routines", {}), ("list_triggers", {}),
+                           ("observation_stats", {}), ("browser_bookmarks", {}), ("workspace", {}),
+                           ("recording_status", {}), ("recording_list", {}), ("mic_sources", {}),
+                           ("list_projects", {"query": "rose"}), ("activity_today", {}), ("standup", {}),
+                           ("clipboard_history", {}), ("today_overview", {}), ("failure_report", {"days": 1}),
+                           ("claude_job_status", {}), ("memory_list", {"limit": 3}),
+                           ("sort_downloads", {"dry_run": True}), ("screen_frame", {"max_side": 320})]:
+            await ok(tool, args)
+        for tool, args in [("freellm_info", {}), ("docker", {}), ("package_updates", {}), ("phone_devices", {}),
+                           ("screen_ocr", {"copy": False}), ("find_on_screen", {"target": "ROSE"}),
+                           ("explain_error", {"project": "rose-MCP"})]:
+            await ok(tool, args, soft=True)  # depends on services/hardware: SKIP, not FAIL, when unavailable
+        for tool in ("git_status", "git_diff_summary", "git_log_today", "project_tasks"):
+            await ok(tool, {"project": "rose-MCP"})
+        await ok("git_branch", {"project": "rose-MCP", "action": "list"})
+        await ok("project_logs", {"project": "rose-MCP"}, soft=True)
+        r = await ok("memory_save", {"text": "ROSE selftest memory (safe to delete)", "tags": "selftest"})
+        mid = (J(r) or {}).get("id") if r is not None and isinstance(J(r), dict) else None
+        await ok("memory_search", {"query": "ROSE selftest memory"}, lambda r: "selftest" in txt(r))
+        if mid:
+            await ok("memory_forget", {"memory_id": mid, "confirm": True})
+        # files: create, edit, copy, zip, unzip, trash, then undo the trash
+        (ws / "f.txt").write_text("one")
+        await ok("create_folder", {"path": f"{WS_REL}/dir"}, lambda r: (ws / "dir").is_dir())
+        await ok("edit_file", {"path": f"{WS_REL}/f.txt", "append": " two"},
+                 lambda r: (ws / "f.txt").read_text().endswith("two"))
+        await ok("copy_file", {"source": f"{WS_REL}/f.txt", "destination": f"{WS_REL}/dir/g.txt"},
+                 lambda r: (ws / "dir" / "g.txt").exists())
+        await ok("zip_files", {"paths": [f"{WS_REL}/f.txt"], "archive": f"{WS_REL}/z.zip"},
+                 lambda r: (ws / "z.zip").exists())
+        await ok("unzip_file", {"archive": f"{WS_REL}/z.zip", "destination": f"{WS_REL}/out"},
+                 lambda r: any((ws / "out").rglob("f.txt")))
+        await ok("trash_file", {"path": f"{WS_REL}/dir/g.txt", "confirm": True},
+                 lambda r: not (ws / "dir" / "g.txt").exists())
+        if "undo_last" in tools and results.get("trash_file", ("",))[0] == "PASS":
+            await ok("undo_last", {"confirm": True}, lambda r: (ws / "dir" / "g.txt").exists())
+
+        if phone:  # read-only checks on the linked phone (actions: `rose phone-check`)
+            for tool, args in [("phone_status", {}), ("phone_contacts", {"query": "a"}), ("phone_ui_list", {}),
+                               ("phone_screenshot", {}), ("phone_notifications", {"action": "list"}),
+                               ("phone_volume", {"action": "get"}), ("phone_call_control", {"action": "status"}),
+                               ("phone_location", {})]:
+                await ok(tool, args)
+
         if full:
+            await ok("screen_elements", {"max_elements": 20})
+            pos = txt(await c("mouse_position", {}))
+            import re as _re
+            m = _re.search(r"Screen \(?(\d+),\s*(\d+)", pos)
+            if m:
+                await ok("mouse_move", {"x": int(m[1]), "y": int(m[2]), "coords": "screen"})
+
             async def close_all(needle):  # clear leftovers from earlier runs so checks are exact
                 for _ in range(5):
                     w = await find_window(s, needle, tries=1)
@@ -300,7 +360,7 @@ def run(full: bool = False, port: int | None = None) -> int:
         shutil.rmtree(ws, ignore_errors=True)
         for t in tools:
             if t not in results:
-                results[t] = ("SKIP", "only in --full" if not full else "not covered")
+                results[t] = ("SKIP", PLAN.get(t, "not in PLAN"))
 
     async def main(tok):
         async with httpx.AsyncClient(headers={"Authorization": f"Bearer {tok}"}, timeout=180) as hc:
@@ -327,5 +387,72 @@ def run(full: bool = False, port: int | None = None) -> int:
         print(f"{st:5} {t:22} {det}")
     n = {k: sum(v[0] == k for v in results.values()) for k in order}
     print(f"\n{n['PASS']} passed, {n['FAIL']} failed, {n['SKIP']} skipped ({len(results)} tools)"
-          + ("" if full else ". Run `rose selftest --full` to include GUI, webcam, speech and Forge."))
+          + ("" if full else ". Run `rose selftest --full` to include GUI, webcam, speech and Forge.")
+          + ("" if phone else " Add --phone for read-only phone checks; `rose phone-check` for phone actions."))
     return 1 if n["FAIL"] else 0
+
+
+# ---------------- coverage plan ----------------
+# Every tool must be listed (tests/test_selftest_plan.py enforces it, so a new tool can't ship untested):
+#   default | full | phone  -> checked automatically by `rose selftest` (with --full / --phone)
+#   phone-check:<step>      -> covered by the interactive `rose phone-check` on the real phone
+#   manual: <reason>        -> deliberately not automated (costs money, sends/changes things, needs hardware)
+_DEFAULT = """check_approval clipboard_read clipboard_write list_monitors take_screenshot list_apps list_windows
+mouse_position send_notification list_allowed_dirs write_file read_file move_file list_dir search_files list_cameras
+github_my_prs github_notifications github_pr_status github_ci_runs system_status quick_settings set_quick_setting
+lock_screen media_control audio_devices set_audio_device set_mic_muted bluetooth_devices wifi_networks wifi_connect
+stop_process list_commands run_command bridge_read forge_send forge_jobs push_status watch_status schedule_list
+rose_maintenance ui_list browser_status undo_history undo_last list_routines list_triggers observation_stats
+browser_bookmarks workspace recording_status recording_list mic_sources list_projects activity_today standup
+clipboard_history today_overview failure_report claude_job_status memory_list memory_save memory_search
+memory_forget sort_downloads screen_frame freellm_info docker package_updates phone_devices screen_ocr
+find_on_screen explain_error git_status git_diff_summary git_log_today project_tasks git_branch project_logs
+create_folder edit_file copy_file zip_files unzip_file trash_file"""
+_FULL = """open_app focus_window close_window open_url open_path mouse_click scroll type_text press_keys webcam_capture
+speak forge_run forge_status bridge_post schedule_add schedule_remove ui_click ui_read ui_fill
+ui_enable_app_accessibility browser_start browser_open browser_tabs browser_fill browser_click browser_read
+browser_press browser_close_tab screen_elements mouse_move"""
+_PHONE = """phone_status phone_contacts phone_ui_list phone_screenshot phone_notifications phone_volume
+phone_call_control phone_location"""
+_PHONE_CHECK = {"phone_call": "call", "phone_message": "message", "phone_lost_mode": "lost_mode",
+                "phone_stop_sound": "lost_mode", "phone_power": "reboot", "phone_mic_record": "listen_live",
+                "phone_speak": "hold_to_talk", "phone_photo": "lost_mode"}
+_MANUAL = {
+    "power_control": "sleeps/restarts the laptop",
+    "bluetooth_connect": "needs a paired device nearby",
+    "git_commit": "creates a real commit", "project_run": "starts a project's task", "new_project": "creates a project in ~/0x",
+    "hand_to_claude": "opens Claude Code and uses quota", "open_project": "opens VS Code windows",
+    "run_routine": "runs user routines (apps, music)", "save_routine": "changes user routines",
+    "freellm_ask": "uses provider quota", "freellm_web_search": "uses provider quota",
+    "freellm_set_routing": "changes FreeLLMAPI state", "freellm_clear_cache": "flushes FreeLLMAPI cache",
+    "click_on_screen": "clicks on the live desktop", "move_window": "moves user windows",
+    "arrange_window": "moves user windows", "tile_windows": "moves user windows",
+    "recording_start": "records the screen", "recording_stop": "pairs with recording_start",
+    "webcam_live_frame": "camera on", "webcam_live_stream": "camera on", "webcam_live_stop": "pairs with stream",
+    "screen_live_stream": "streams the screen", "screen_live_stop": "pairs with stream",
+    "mic_live_start": "microphone on", "mic_live_stop": "pairs with mic_live_start",
+    "motion_watch_start": "camera on", "motion_events": "needs motion_watch", "motion_watch_stop": "pairs with start",
+    "phone_connect": "changes the phone link", "phone_open_app": "acts on the phone", "phone_tap": "acts on the phone",
+    "phone_swipe": "acts on the phone", "phone_type": "acts on the phone", "phone_key": "acts on the phone",
+    "phone_click_text": "acts on the phone", "phone_media": "acts on the phone", "phone_setting": "may cut the link",
+    "phone_screen": "acts on the phone", "phone_alarm": "sets a real alarm", "phone_open_url": "acts on the phone",
+    "phone_scroll": "acts on the phone", "send_to_phone": "pushes a file to the phone",
+    "phone_get_files": "pulls files from the phone",
+}
+PLAN: dict[str, str] = {
+    **{t: "default" for t in _DEFAULT.split()}, **{t: "full (rose selftest --full)" for t in _FULL.split()},
+    **{t: "phone (rose selftest --phone)" for t in _PHONE.split()},
+    **{t: f"phone-check:{s}" for t, s in _PHONE_CHECK.items()}, **{t: f"manual: {r}" for t, r in _MANUAL.items()},
+}
+
+
+def print_plan() -> int:
+    from collections import Counter
+
+    from rose.server import _tool_table
+    names = [fn.__name__ for fn, _ in _tool_table()]
+    for n in names:
+        print(f"{n:28} {PLAN.get(n, 'MISSING FROM PLAN')}")
+    kinds = Counter(PLAN.get(n, "missing").split(" ")[0].split(":")[0] for n in names)
+    print("\n" + ", ".join(f"{k}: {v}" for k, v in kinds.most_common()) + f" ({len(names)} tools)")
+    return 1 if kinds.get("missing") else 0

@@ -1,0 +1,38 @@
+# Runs on every push and pull request: the full pytest suite (isolated ROSE_HOME, no desktop needed) plus
+# the tool coverage gate (tests/test_improvements.py fails if a tool is missing from rose/selftest.py PLAN).
+# The live `rose selftest` needs the real laptop and stays a local command.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: System tools some tests shell out to
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg qrencode
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Tests
+        run: uv run pytest -q
+      - name: Tool coverage plan
+        run: |
+          uv run python - <<'PY'
+          from rose import selftest, server
+          names = [fn.__name__ for fn, _ in server._tool_table()]
+          missing = sorted(set(names) - set(selftest.PLAN))
+          print(f"{len(names)} tools, {len(names) - len(missing)} in the selftest plan")
+          raise SystemExit(f"missing from PLAN: {missing}" if missing else 0)
+          PY

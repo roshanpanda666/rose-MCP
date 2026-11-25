@@ -263,3 +263,10 @@ input.hue.auto { opacity: .35; }
 .guard-img { display: block; max-width: 100%; max-height: 320px; margin-top: 8px; border-radius: 10px; }
 #guardOut { margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 #gListen.on, #gTalk.on { background: var(--bad); color: #fff; }
+
+/* Today view */
+.today-list li { display: grid; grid-template-columns: 6.5em 1fr auto; gap: .6em; align-items: start; padding: .35em 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.15)); }
+.today-list li:last-child { border-bottom: 0; }
+.today-list li.past { opacity: .5; }
+.today-list li.now { font-weight: 600; }
+.today-list li.unread > span:nth-child(2) { font-weight: 600; }

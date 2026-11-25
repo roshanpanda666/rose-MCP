@@ -334,3 +334,26 @@ tests/         # pytest suite (uv run pytest -q)
 scripts/       # mcp_probe.py: remote conformance probe
 deploy/        # systemd user units
 ```
+
+
+## Profiles, Today view, proactive Rose, failure report, phone checks
+
+- **Tool profiles** (`rose/profiles.py`, `rose profiles`): `dev` (73 tools), `phone` (110), `desktop` (117),
+  `full` (all). Pick per client in config.toml: `client_profiles = {"Phone app" = "phone"}` (labels from
+  `rose auth list`), or `rose stdio --profile dev`. Default stays `full`, so nothing changes until you set it.
+- **Today** (`rose/agenda.py`): calendar from secret iCal URLs (recurring events, moved/cancelled instances)
+  and today's inbox over read-only IMAP. Set up with `rose agenda setup` (stored in `~/rose/auth/agenda.json`,
+  0600). Shown in ROSE Desktop > Today and the `today_overview` tool.
+- **Proactive Rose** (`rose/proactive.py`, run by rose-watch): meeting heads-up (`meeting_alert_minutes`),
+  failed GitHub Actions runs on recently pushed repos (`ci_runs_watch`), low battery on laptop and phone
+  (`phone_battery_alert_percent`), break reminder after `break_reminder_minutes` of activity. Pushed, and
+  spoken on the laptop outside `quiet_hours`.
+- **Weekly failure report** (`rose/failures.py`): failed tool calls (all clients + phone app local tools) and
+  Rose's "I can't" replies (from the phone app's `logs/replies.jsonl`). rose-watch saves it to
+  `~/rose/reports/` every `failure_report_day` at `failure_report_time` and pushes a summary;
+  `rose failures [--days N]` and the `failure_report` tool any time.
+- **Selftest coverage**: `rose selftest --plan` shows how every tool is tested (default / --full / --phone /
+  phone-check / manual with a reason). CI (`.github/workflows/ci.yml`) runs pytest on every push and fails if
+  a tool is missing from the plan.
+- **Phone checks**: `rose phone-check` walks through calling, messaging, lost mode, listen live,
+  hold-to-talk and reboot on the real phone; see [docs/PHONE_CHECKLIST.md](docs/PHONE_CHECKLIST.md).

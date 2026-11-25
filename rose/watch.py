@@ -4,7 +4,8 @@ Every 30 s: due schedules (reminders, reports, scheduled Forge tasks), new secur
 sampler (rose.activity) and context triggers (rose.triggers). Every 5 min: disk, RAM, battery.
 Every 10 min: GitHub (CI failing / passing again on your PRs, new reviews and review comments on them,
 new review requests).
-Daily: cleanup of old screenshots/logs. Alerts go to the phone (ntfy) and the desktop.
+Daily: cleanup of old screenshots/logs. Weekly: failure report (rose.failures). Proactive alerts (meetings,
+failed CI runs, phone battery, breaks) come from rose.proactive. Alerts go to the phone (ntfy) and the desktop.
 """
 
 from __future__ import annotations
@@ -401,6 +402,11 @@ def _watching() -> list[str]:
            "CI passing again", "reviews and review comments on your PRs", "new review requests", "daily cleanup"]
     if cfg.get("activity_enabled", True):
         out.append(f"work log (active window; summary at {cfg.get('activity_summary_time', '23:00')})")
+    if cfg.get("proactive_enabled", True):
+        out += ["upcoming meetings (calendar)", "failed CI runs on recently pushed repos", "phone battery",
+                f"break reminders (every {cfg.get('break_reminder_minutes', 120)} min of activity)"]
+    if cfg.get("failure_report_day", "mon"):
+        out.append(f"weekly failure report ({cfg.get('failure_report_day')} {cfg.get('failure_report_time')})")
     try:
         from rose import triggers
         trig = triggers._triggers()
@@ -510,6 +516,10 @@ def run() -> int:
             from rose import activity, triggers
             _safe("activity", activity.tick, state)
             _safe("triggers", triggers.tick, state)
+            from rose import failures, proactive
+            _safe("proactive", proactive.tick, state)
+            if failures.weekly_due(state):
+                threading.Thread(target=_safe, args=("failure_report", failures.send_weekly), daemon=True).start()
             if now - state.get("last_cleanup", 0) >= 86400:
                 state["last_cleanup"] = now
                 maintenance.cleanup()

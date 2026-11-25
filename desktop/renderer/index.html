@@ -71,6 +71,30 @@
       </section>
 
       <!-- REMOTE -->
+      <!-- TODAY -->
+      <section data-section="today" hidden>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Calendar</h2><span class="muted small" id="todayDate"></span>
+              <div class="grow"></div><button id="todayRefresh" class="small-btn">Refresh</button></div>
+            <div id="todayNext" class="muted small"></div>
+            <ul class="plain today-list" id="todayEvents"></ul>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Email</h2><span class="muted small" id="todayUnread"></span></div>
+            <ul class="plain today-list" id="todayMail"></ul>
+          </div>
+        </div>
+        <div class="card" id="todayNotesCard" hidden>
+          <div class="card-h"><h2>Set up</h2></div>
+          <ul class="plain" id="todayNotes"></ul>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>Failures this week</h2><span class="muted small">failed tool calls · "I can't" replies</span></div>
+          <div id="todayFailures" class="muted small">Loading…</div>
+        </div>
+      </section>
+
       <section data-section="remote" hidden>
         <div class="grid2">
           <div class="card">

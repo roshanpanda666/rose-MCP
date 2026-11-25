@@ -1,7 +1,7 @@
 """`rose` command line.
 
     rose serve [--port N]     MCP over streamable HTTP on 127.0.0.1 (auth required)
-    rose stdio                MCP over stdio (fallback for local clients)
+    rose stdio [--profile P]  MCP over stdio (fallback for local clients); P = dev | phone | desktop | full
     rose tunnel               Public tunnel: ngrok static domain or Cloudflare quick tunnel
     rose status               What's running, URLs, auth summary, today's activity
     rose logs [-n N] [-f] [--kind tools|http|tunnel]
@@ -12,7 +12,11 @@
     rose install-services      Install the systemd services (server + tunnel), replacing v2's rose-remote
     rose lockdown on|off      Emergency switch: make ROSE read-only for every client
     rose grant [end]          Show or end the "approved for an hour" window
-    rose selftest [--full]    Test every tool through the running server
+    rose selftest [--full] [--phone]  Test every tool through the running server (--plan: coverage plan)
+    rose profiles             Tool profiles and how many tools each client sees
+    rose agenda setup|status  Calendar (iCal URL) + email (IMAP) for the Today view and today_overview
+    rose failures [--days N] [--save]  Failed tool calls and "I can't" replies (weekly via rose-watch)
+    rose phone-check [steps]  Live checklist on the real phone (call, message, lost mode, listen, talk, reboot)
     rose push setup|test      Phone notifications (ntfy)
     rose cleanup              Delete old screenshots/logs now
     rose watch                Watchers + schedules (runs as rose-watch.service)
@@ -51,6 +55,8 @@ def cmd_serve(args) -> int:
 
 def cmd_stdio(args) -> int:
     from rose.server import run_stdio
+    if getattr(args, "profile", ""):
+        os.environ["ROSE_PROFILE"] = args.profile
     run_stdio()
     return 0
 
@@ -305,7 +311,46 @@ def cmd_cleanup(args) -> int:
 
 def cmd_selftest(args) -> int:
     from rose import selftest
-    return selftest.run(full=args.full)
+    if args.plan:
+        return selftest.print_plan()
+    return selftest.run(full=args.full, phone=args.phone, port=args.port)
+
+
+def cmd_profiles(args) -> int:
+    from rose import profiles
+    from rose.config import load_config
+    from rose.server import _tool_table
+    names = [fn.__name__ for fn, _ in _tool_table()]
+    disabled = set(load_config().get("disabled_tools") or [])
+    names = [n for n in names if n not in disabled]
+    for prof, n in profiles.summary(names).items():
+        print(f"{prof:10} {n:4} tools")
+    cfg = load_config()
+    print(f"\ndefault_profile = {cfg.get('default_profile', 'full')!r}")
+    for who, prof in (cfg.get("client_profiles") or {}).items():
+        print(f"  {who!r} -> {prof!r}")
+    if args.show:
+        print(f"\n{args.show}: " + ", ".join(sorted(profiles.expand(args.show, names) or names)))
+    return 0
+
+
+def cmd_agenda(args) -> int:
+    from rose import agenda
+    return agenda.cli([args.action])
+
+
+def cmd_failures(args) -> int:
+    from rose import failures
+    r = failures.report(args.days, save=args.save)
+    print(r["markdown"])
+    if r.get("saved"):
+        print(f"Saved to {r['saved']}")
+    return 0
+
+
+def cmd_phone_check(args) -> int:
+    from rose import phonecheck
+    return phonecheck.cli(args.steps or None, args.include_poweroff, args.report)
 
 
 def cmd_lockdown(args) -> int:
@@ -398,7 +443,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("serve", help="MCP over streamable HTTP on 127.0.0.1 (auth required)")
     p.add_argument("--port", type=int, default=None)
     p.set_defaults(fn=cmd_serve)
-    sub.add_parser("stdio", help="MCP over stdio").set_defaults(fn=cmd_stdio)
+    p = sub.add_parser("stdio", help="MCP over stdio")
+    p.add_argument("--profile", default="", help="tool profile: dev | phone | desktop | full (see `rose profiles`)")
+    p.set_defaults(fn=cmd_stdio)
     sub.add_parser("tunnel", help="public tunnel to rose serve (ngrok or Cloudflare)").set_defaults(fn=cmd_tunnel)
     sub.add_parser("status", help="what's running").set_defaults(fn=cmd_status)
     sub.add_parser("reload", help="restart the HTTP server with new code").set_defaults(fn=cmd_reload)
@@ -434,7 +481,25 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_cleanup)
     p = sub.add_parser("selftest", help="test every tool through the running server")
     p.add_argument("--full", action="store_true", help="also GUI, webcam, speech, browser tab, a Forge job")
+    p.add_argument("--phone", action="store_true", help="also read-only checks on the linked phone")
+    p.add_argument("--plan", action="store_true", help="print how each tool is covered, don't run anything")
+    p.add_argument("--port", type=int, default=None, help="server port (default: http_port from config)")
     p.set_defaults(fn=cmd_selftest)
+    p = sub.add_parser("profiles", help="tool profiles (dev/phone/desktop/full) and tool counts")
+    p.add_argument("--show", default="", help="list the tools in one profile")
+    p.set_defaults(fn=cmd_profiles)
+    p = sub.add_parser("agenda", help="calendar + email for the Today view: setup | status | test | off")
+    p.add_argument("action", choices=["setup", "status", "test", "off"], nargs="?", default="status")
+    p.set_defaults(fn=cmd_agenda)
+    p = sub.add_parser("failures", help="failed tool calls and \"I can't\" replies (last N days)")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--save", action="store_true", help="also save to ~/rose/reports/")
+    p.set_defaults(fn=cmd_failures)
+    p = sub.add_parser("phone-check", help="live checklist on the real phone (asks before anything noticeable)")
+    p.add_argument("steps", nargs="*", help="only these steps (default: all but poweroff)")
+    p.add_argument("--include-poweroff", action="store_true")
+    p.add_argument("--report", action="store_true", help="show the last result per step")
+    p.set_defaults(fn=cmd_phone_check)
     p = sub.add_parser("lockdown", help="make ROSE read-only for everyone: on | off | status")
     p.add_argument("state", choices=["on", "off", "status"], nargs="?", default="status")
     p.set_defaults(fn=cmd_lockdown)
