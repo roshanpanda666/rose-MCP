@@ -93,6 +93,17 @@ def write_file(path: str, content: str, overwrite: bool = False, confirm: bool =
     return f"Wrote {len(content)} characters to {p}"
 
 
+def create_folder(path: str) -> str:
+    """Create a folder (and any missing parents). Fine if it already exists."""
+    p = _resolve(path)
+    if p.exists() and not p.is_dir():
+        raise ToolError(f"{p} exists and is a file, not a folder.")
+    if p.is_dir():
+        return f"Folder already exists: {p}"
+    p.mkdir(parents=True)
+    return f"Created folder {p}"
+
+
 def move_file(source: str, destination: str, confirm: bool = False) -> str:
     """Move/rename a file or folder. Replacing a file needs confirm=true."""
     src = _resolve(source)

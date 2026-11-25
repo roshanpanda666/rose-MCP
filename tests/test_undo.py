@@ -45,6 +45,19 @@ def test_new_file_is_removed_on_undo(ws):
     assert not (ws / "fresh.txt").exists()
 
 
+def test_create_folder_and_undo(ws):
+    assert "Created folder" in undo.undoable(files.create_folder)(str(ws / "proj" / "sub"))
+    assert (ws / "proj" / "sub").is_dir()
+    assert "already exists" in files.create_folder(str(ws / "proj" / "sub"))
+    (ws / "f.txt").write_text("x")
+    with pytest.raises(ToolError, match="is a file"):
+        files.create_folder(str(ws / "f.txt"))
+    with pytest.raises(ToolError, match="Access denied"):
+        files.create_folder("/etc/rose-nope")
+    assert "removed folder proj" in undo.undo_last()
+    assert not (ws / "proj").exists()
+
+
 def test_setting_is_restored(ws, monkeypatch):
     from rose.tools import quick
 

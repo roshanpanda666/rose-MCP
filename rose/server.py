@@ -179,6 +179,7 @@ def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
         (files.read_file, READ_ONLY),
         (undo.undoable(files.write_file), DESTRUCTIVE),
         (undo.undoable(files.move_file), DESTRUCTIVE),
+        (undo.undoable(files.create_folder), WRITES),
         (files.search_files, READ_ONLY),
         (system.system_status, READ_ONLY),
         (quick.quick_settings, READ_ONLY),

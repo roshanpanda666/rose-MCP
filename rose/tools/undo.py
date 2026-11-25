@@ -72,6 +72,16 @@ def _before(tool: str, kw: dict) -> dict | None:
             shutil.copy2(p, backup)
             return {"kind": "restore_file", "path": str(p), "backup": str(backup)}
         return {"kind": "remove_new_file", "path": str(p)}
+    if tool == "create_folder":
+        from rose.tools import files
+
+        p = files._resolve(kw["path"])
+        if p.exists():
+            return None
+        top = p  # topmost folder this call will create, so undo removes all of it
+        while not top.parent.exists():
+            top = top.parent
+        return {"kind": "remove_new_dir", "path": str(top)}
     if tool in ("move_window", "arrange_window", "tile_windows", "workspace"):
         return {"kind": "windows", "windows": _windows_snapshot()}
     if tool == "set_quick_setting":
@@ -101,6 +111,8 @@ def _after(tool: str, kw: dict, result, snap: dict | None) -> tuple[str, dict] |
     if tool == "move_file" and isinstance(result, str) and " -> " in result:
         src, dst = result.removeprefix("Moved ").split(" -> ", 1)
         return f"moved {Path(src).name} to {dst}", {"kind": "move_back", "from": dst, "to": src}
+    if tool == "create_folder" and snap and isinstance(result, str) and result.startswith("Created folder "):
+        return f"created folder {Path(snap['path']).name}", snap
     if snap is None:
         return None
     if tool == "write_file":
@@ -200,6 +212,13 @@ def _reverse(u: dict) -> str:
         if p.exists():
             p.unlink()
         return f"removed {p.name} (it didn't exist before)"
+    if kind == "remove_new_dir":
+        p = Path(u["path"])
+        if p.is_dir():
+            if any(f.is_file() or f.is_symlink() for f in p.rglob("*")):
+                raise ToolError(f"Can't remove {p}: files were added to it since.")
+            shutil.rmtree(p)
+        return f"removed folder {p.name} (it didn't exist before)"
     if kind == "windows":
         from rose.tools import apps
 
