@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 420" width="420" height="420">
+  <!-- Rose's props (camera, tablet, binoculars, headphones, held item, tear) with arms: shared by the
+       phone app and the desktop dial. Same coordinates as rose_avatar.svg. Generated, then hand-edited. --><defs>
+      <linearGradient id="gScreen" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7fd6ff"/><stop offset="1" stop-color="#6a3cff"/></linearGradient>
+      <radialGradient id="gLens" cx=".35" cy=".35" r=".7"><stop offset="0" stop-color="#9fdcff"/><stop offset=".45" stop-color="#1d3d66"/><stop offset="1" stop-color="#05080f"/></radialGradient></defs>
+    <g id="p-headphones">
+      <path d="M118 216 C108 118 160 66 210 66 C260 66 312 118 302 216" fill="none" stroke="#1c1b22" stroke-width="13" stroke-linecap="round"/>
+      <path d="M118 216 C108 118 160 66 210 66 C260 66 312 118 302 216" fill="none" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+      <rect x="100" y="194" width="36" height="60" rx="15" fill="#1c1b22"/><rect x="284" y="194" width="36" height="60" rx="15" fill="#1c1b22"/>
+      <circle cx="118" cy="224" r="8" fill="#ff4f8b"/><circle cx="302" cy="224" r="8" fill="#ff4f8b"/>
+      <path d="M118 250 Q130 302 186 304" fill="none" stroke="#1c1b22" stroke-width="5" stroke-linecap="round"/><circle cx="188" cy="304" r="6" fill="#ff4f8b"/>
+      <path d="M350 432 Q312 357 302 256" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M350 432 Q312 357 302 256" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M350 440 L331.8 361.3" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M319.8 365.3 L343.8 357.3" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(302 246)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="-12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g></g>
+    <g id="p-binos">
+      <rect x="138" y="206" width="66" height="62" rx="16" fill="#2a2c34"/><rect x="216" y="206" width="66" height="62" rx="16" fill="#2a2c34"/>
+      <rect x="196" y="222" width="28" height="20" rx="4" fill="#3b3e48"/>
+      <circle cx="171" cy="238" r="23" fill="url(#gLens)" stroke="#5d6676" stroke-width="4"/>
+      <circle cx="249" cy="238" r="23" fill="url(#gLens)" stroke="#5d6676" stroke-width="4"/>
+      <ellipse cx="163" cy="229" rx="7" ry="4.5" fill="#fff" opacity=".75"/><ellipse cx="241" cy="229" rx="7" ry="4.5" fill="#fff" opacity=".75"/>
+      <path d="M112 432 Q143 371 146 284" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M112 432 Q143 371 146 284" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M112 440 L124.9 372.0" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M112.9 376.0 L136.9 368.0" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(146 274)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g><path d="M308 432 Q277 371 274 284" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M308 432 Q277 371 274 284" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M308 440 L295.1 372.0" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M283.1 376.0 L307.1 368.0" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(274 274)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="-12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g></g>
+    <g id="p-camera">
+      <rect x="206" y="206" width="100" height="64" rx="11" fill="#2b2d36" stroke="#101116" stroke-width="2"/>
+      <rect x="220" y="196" width="28" height="13" rx="3" fill="#2b2d36"/>
+      <circle cx="252" cy="238" r="23" fill="#121318" stroke="#737886" stroke-width="4"/>
+      <circle cx="252" cy="238" r="13" fill="url(#gLens)"/><circle cx="246" cy="232" r="4" fill="#fff" opacity=".85"/>
+      <circle cx="294" cy="217" r="4.5" fill="#ff4f8b"/><rect x="270" y="212" width="14" height="7" rx="2" fill="#cfd3dc"/>
+      <path d="M146 432 Q191 365 208 272" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M146 432 Q191 365 208 272" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M146 440 L169.6 367.4" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M157.6 371.4 L181.6 363.4" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(208 262)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g><path d="M350 432 Q314 365 306 272" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M350 432 Q314 365 306 272" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M350 440 L333.3 367.4" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M321.3 371.4 L345.3 363.4" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(306 262)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="-12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g>
+      <g id="p-flash"><polygon points="277,214 284,190 291,214 315,207 296,222 315,237 291,230 284,254 277,230 253,237 272,222 253,207" fill="#fff6b8" opacity=".95"/></g></g>
+    <g id="p-tablet">
+      <ellipse cx="210" cy="262" rx="86" ry="34" fill="#7fd6ff" opacity=".16"/>
+      <rect x="126" y="272" width="168" height="108" rx="11" fill="#1a1d26" stroke="#0a0b0f" stroke-width="3"/>
+      <rect x="135" y="281" width="150" height="90" rx="5" fill="url(#gScreen)"/>
+      <g id="p-screenlines" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity=".7">
+        <path d="M148 298 H220"/><path d="M148 312 H260"/><path d="M148 326 H238"/><path d="M148 340 H200"/></g>
+      <path d="M104 432 Q131 401 130 344" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M104 432 Q131 401 130 344" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M104 440 L113.9 394.8" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M101.9 398.8 L125.9 390.8" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(130 334)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g><path d="M316 432 Q289 401 290 344" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M316 432 Q289 401 290 344" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M316 440 L306.1 394.8" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M294.1 398.8 L318.1 390.8" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(290 334)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="-12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g></g>
+    <g id="p-item">
+      <circle cx="286" cy="264" r="26" fill="#fff" opacity=".93" stroke="#ff4f8b" stroke-width="2"/>
+      <text id="p-itemt" x="286" y="274" font-size="28" text-anchor="middle">🔍</text>
+      <path d="M328 432 Q288 380 276 302" fill="none" stroke="#e2a892" stroke-width="21" stroke-linecap="round"/>
+        <path d="M328 432 Q288 380 276 302" fill="none" stroke="#ffd9c7" stroke-width="17" stroke-linecap="round"/>
+        <path d="M328 440 L308.2 378.8" fill="none" stroke="#2c1b36" stroke-width="31" stroke-linecap="round"/>
+        <path d="M296.2 382.8 L320.2 374.8" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+        <g transform="translate(276 292)">
+          <rect x="-13" y="-12" width="26" height="24" rx="11" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+          <path d="M-9 -5 H7 M-10 1 H8 M-9 7 H6" stroke="#d9917f" stroke-width="1.6" stroke-linecap="round"/>
+          <ellipse cx="-12" cy="-1" rx="5.5" ry="9" fill="#ffd9c7" stroke="#e2a892" stroke-width="1.8"/>
+        </g></g>
+    <g id="p-tear"><path d="M152 262 Q145 277 152 284 Q160 277 152 262 Z" fill="#8fd0ff" stroke="#5aa7e6" stroke-width="1.5"/></g>
+    </svg>

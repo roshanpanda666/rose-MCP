@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'">
+<title>Rose</title>
+<link rel="stylesheet" href="../renderer/palettes.css">
+<link rel="stylesheet" href="chat.css">
+<script src="../renderer/theme.js"></script>
+</head>
+<body>
+<div class="card" id="card">
+  <header class="head">
+    <div class="who">
+      <div class="ava" id="ava"><img id="avaImg" alt="" hidden><span class="dot" id="dot"></span></div>
+      <div class="names">
+        <div class="name">Rose</div>
+        <div class="status" id="status">here with you</div>
+      </div>
+    </div>
+    <div class="tools">
+      <button class="ib" id="speakBtn" title="Speak replies" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/><path class="off" d="M16 9l5 6M21 9l-5 6"/></svg></button>
+      <button class="ib" id="caveBtn" title="Caveman mode: short replies" aria-pressed="true"><span class="ib-txt">Aa</span></button>
+      <button class="ib" id="newBtn" title="New conversation (Ctrl+N)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button class="ib" id="sizeBtn" title="Bigger / smaller"><svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg></button>
+      <button class="ib" id="moreBtn" title="More"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+      <button class="ib" id="closeBtn" title="Hide (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+  </header>
+
+  <main class="log" id="log" aria-live="polite"></main>
+  <button class="jump" id="jumpBtn" hidden title="Latest">↓</button>
+
+  <div class="ptt" id="ptt" hidden>
+    <span class="wave"><i></i><i></i><i></i><i></i></span>
+    <span class="ptt-text" id="pttText">Listening…</span>
+    <button class="link" id="pttCancel">Cancel</button>
+  </div>
+
+  <footer class="composer">
+    <div class="field">
+      <textarea id="input" rows="1" placeholder="Message Rose…" spellcheck="true"></textarea>
+      <button class="ib mic" id="micBtn" title="Talk (push-to-talk)"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+      <button class="send" id="sendBtn" title="Send (Enter)" disabled><svg class="i-send" viewBox="0 0 24 24"><path d="M4 12l16-8-6 16-2.5-6.5L4 12z"/></svg><svg class="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></svg></button>
+    </div>
+    <div class="hint" id="hint">Enter to send · Shift+Enter new line · Esc to hide</div>
+  </footer>
+</div>
+<script src="md.js"></script>
+<script src="chat.js"></script>
+</body>
+</html>

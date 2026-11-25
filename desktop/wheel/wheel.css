@@ -1,0 +1,116 @@
+/* ROSE desktop menu wheel. Ring styles come from the phone app (rose-phone-app/frontend/style.css), kept close
+   so both dials look and move the same. The page itself is transparent: only the button, rings, chips and
+   toasts are drawn. */
+:root {
+  /* --panel, --fg, --accent... come from the shared ROSE theme (../renderer/palettes.css, picked in the Theme ring). */
+  --glass-line: color-mix(in srgb, #fff 12%, transparent);
+  --glass-hi: inset 0 1px 0 color-mix(in srgb, #fff 8%, transparent);
+}
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+body { color: var(--fg); font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  user-select: none; -webkit-user-select: none; }
+button { font: inherit; }
+.lic { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---------- the floating round button (drag to move, click to open) ---------- */
+.wheel-btn { position: fixed; z-index: 31; left: 0; top: 0; width: 54px; height: 54px; border-radius: 50%; border: 0; cursor: grab;
+  display: grid; place-items: center; padding: 0;
+  background: radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 85%, #fff), var(--accent));
+  color: var(--accent-ink);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 40%, transparent), 0 2px 5px rgb(0 0 0 / .3);
+  transition: transform .2s; touch-action: none; }
+.wheel-btn svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+.wheel-btn:active { transform: scale(.92); }
+.wheel-btn.moving { cursor: grabbing; transition: none; transform: scale(1.06); }
+.wheel-btn[aria-expanded="true"] { transform: rotate(45deg); }
+.wheel-btn.off { visibility: hidden; }
+.wheel-search { position: fixed; z-index: 40; padding: 5px 12px; border-radius: 14px; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--accent); color: var(--fg); font-size: 14px; white-space: pre;
+  box-shadow: 0 4px 12px rgb(0 0 0 / .35); }
+.wheel-search.miss { border-color: var(--bad); color: var(--bad); }
+.wheel-btn.recording { background: var(--bad); box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 30%, transparent); }
+
+/* ---------- rings ---------- */
+.wheel { position: fixed; inset: 0; z-index: 30; pointer-events: none; }
+.wheel-dial { --r: 160px; position: absolute; border-radius: 50%; pointer-events: none; user-select: none;
+  background: radial-gradient(circle at 50% 50%,
+    transparent calc(var(--r) - 54px), var(--line) calc(var(--r) - 53px),
+    color-mix(in srgb, var(--panel) 84%, transparent) calc(var(--r) - 52px) calc(var(--r) + 51px),
+    var(--line) calc(var(--r) + 52px), transparent calc(var(--r) + 53px));
+  transform-origin: 50% 50%;
+  animation: dial-in .28s cubic-bezier(.2,1.2,.4,1);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  -webkit-mask: radial-gradient(circle, transparent calc(var(--r) - 54px), #000 calc(var(--r) - 53px) calc(var(--r) + 52px), transparent calc(var(--r) + 53px));
+  mask: radial-gradient(circle, transparent calc(var(--r) - 54px), #000 calc(var(--r) - 53px) calc(var(--r) + 52px), transparent calc(var(--r) + 53px)); }
+@keyframes dial-in { from { transform: scale(.3); opacity: 0; } }
+.wheel-ring { position: absolute; inset: 0; transition: transform .35s cubic-bezier(.2,.8,.2,1); }
+.wheel-ring.dragging { transition: none; }
+.wheel-item { position: absolute; left: 50%; top: 50%; width: 66px; height: 66px; margin: -33px 0 0 -33px; border-radius: 50%;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--fg); display: grid; place-items: center; cursor: pointer; padding: 0;
+  pointer-events: auto; touch-action: none; box-shadow: 0 4px 12px rgb(0 0 0 / .35);
+  transition: transform .3s cubic-bezier(.2,1.25,.4,1), background .15s, border-color .15s, box-shadow .15s, opacity .2s; }
+.wheel-item:hover { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); }
+.wheel-item:active { transform: var(--pos) scale(.9); }
+.wheel-ring.dragging .wheel-item { transition: background .15s, opacity .2s; }
+.wheel-item .wi-inner { display: grid; place-items: center; gap: 1px; transition: transform .35s cubic-bezier(.2,.8,.2,1); }
+.wheel-ring.dragging .wheel-item .wi-inner { transition: none; }
+.wheel-item .wi-label { font-size: 9.5px; color: var(--muted); max-width: 62px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wheel-item.focus { background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.wheel-item.focus .wi-label { color: var(--fg); }
+.wheel-item.on { border-color: var(--bad); }
+.wheel-item.fired { animation: fired .35s ease-out; }
+@keyframes fired { 40% { transform: var(--pos) scale(1.18); } }
+.wheel-item .wi-img { width: 30px; height: 30px; object-fit: contain; pointer-events: none; }
+.wheel-item .wi-swatch { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
+  background: linear-gradient(135deg, var(--sw-bg) 50%, var(--sw-accent) 50%); }
+.wheel-item .wi-favicon { width: 24px; height: 24px; padding: 2px; border-radius: 6px; background: #fff; }
+#lapRing:not([data-ready]) .wheel-item .wi-inner { animation: dim 1s ease-in-out infinite; }
+@keyframes dim { 50% { opacity: .4; } }
+.wheel-focus-act { position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; margin: -13px 0 0 -13px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--bad); background: var(--panel-2); color: var(--bad); cursor: pointer;
+  pointer-events: auto; display: grid; place-items: center; box-shadow: 0 2px 8px rgb(0 0 0 / .35); z-index: 2; }
+.wheel-focus-act .wfa-inner { display: grid; place-items: center; }
+.wheel-focus-act svg { width: 14px; height: 14px; }
+.wheel-band { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.wheel-band circle { fill: none; stroke: transparent; pointer-events: stroke; touch-action: none; cursor: grab; }
+
+.skeleton { background: linear-gradient(90deg, var(--panel-2) 25%, color-mix(in srgb, var(--fg) 10%, var(--panel-2)) 50%, var(--panel-2) 75%);
+  background-size: 200% 100%; animation: shimmer 1.2s linear infinite; border-radius: 8px; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* ---------- tips, A-Z letter, info chips, toasts ---------- */
+.wheel-tip, .toast, .wheel-letter, .info-chip {
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4); backdrop-filter: blur(18px) saturate(1.4); }
+.wheel-tip { position: fixed; z-index: 40; padding: 8px 12px; border-radius: 12px; color: var(--fg);
+  border: 1px solid var(--line); box-shadow: 0 8px 24px rgb(0 0 0 / .35); font-size: 13px; pointer-events: none;
+  animation: tip-in .16s ease-out; }
+@keyframes tip-in { from { opacity: 0; transform: translateY(6px); } }
+.wheel-letter { position: fixed; z-index: 32; width: 44px; height: 44px; display: grid; place-items: center; pointer-events: none;
+  border-radius: 14px; font-size: 22px; font-weight: 700; color: var(--accent); border: 1px solid var(--glass-line);
+  box-shadow: var(--glass-hi), 0 10px 30px rgb(0 0 0 / .35), 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent);
+  opacity: 0; transform: scale(.85); transition: opacity .14s ease, transform .18s cubic-bezier(.2,1.3,.4,1); }
+.wheel-letter.show { opacity: 1; transform: scale(1); }
+.info-arc { position: fixed; inset: 0; z-index: 29; pointer-events: none; }
+.info-chip { position: absolute; transform: translate(-50%, -50%); display: inline-flex; align-items: center; gap: 6px;
+  max-width: 170px; padding: 6px 11px; border-radius: 999px; font-size: 12.5px; font-weight: 600; white-space: nowrap; color: var(--fg);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--glass-line));
+  box-shadow: var(--glass-hi), 0 6px 18px rgb(0 0 0 / .3), 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
+  animation: chip-pop .2s cubic-bezier(.2,1.3,.4,1); }
+.info-chip span { overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.info-chip .lic { width: 14px; height: 14px; color: var(--accent); }
+@keyframes chip-pop { from { opacity: 0; transform: translate(-50%, -50%) scale(.8); } }
+
+.toast { position: fixed; z-index: 45; display: grid; gap: 6px; width: 260px; padding: 10px 13px; border-radius: 14px;
+  border: 1px solid var(--glass-line); box-shadow: var(--glass-hi), 0 10px 30px rgb(0 0 0 / .35); font-size: 13px;
+  color: var(--fg); animation: tip-in .16s ease-out; overflow-wrap: anywhere; }
+.toast .t-app { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+.toast .t-body { max-height: 160px; overflow: auto; white-space: pre-wrap; }
+.toast img { max-width: 100%; border-radius: 8px; }
+.toast .approve-link { justify-self: start; padding: 6px 12px; border-radius: 8px; border: 0; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+
+@media (prefers-reduced-motion: reduce) {
+  .wheel-ring, .wheel-item, .wheel-item .wi-inner, .wheel-dial, .skeleton { transition: none; animation: none; }
+}

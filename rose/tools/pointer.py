@@ -137,6 +137,19 @@ def _find(target: str, area: str) -> tuple[list[dict], str]:
     return _dedupe(ocr), f"OCR of {label}"
 
 
+def screen_elements(max_elements: int = 80) -> dict:
+    """Clickable elements of the active window with exact screen boxes (named or not), for picking icons
+    visually: the phone app numbers them on a screenshot and asks a vision model which one is meant."""
+    from rose.tools.ui import _call
+
+    els = _call({"op": "boxes", "unnamed": True}, timeout=15).get("elements", [])
+    els = [e for e in els if e.get("actionable") and 8 <= e["w"] <= 400 and 8 <= e["h"] <= 200]
+    els.sort(key=lambda e: e["w"] * e["h"])  # small controls (icons) first
+    out = [{"x": e["x"], "y": e["y"], "w": e["w"], "h": e["h"], "role": e["role"], "name": e["name"][:40]}
+           for e in els[:max(5, min(max_elements, 150))]]
+    return {"elements": out, "count": len(out)}
+
+
 def find_on_screen(target: str, area: Literal["auto", "active_window", "desktop"] = "auto") -> dict:
     """Where visible text is on screen (button, link, tab, label): exact screen coordinates. Tree first, then OCR."""
     cands, how = _find(target, area)

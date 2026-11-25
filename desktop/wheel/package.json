@@ -1,0 +1,7 @@
+{
+  "name": "rose-wheel",
+  "version": "1.0.0",
+  "description": "ROSE desktop menu wheel: the phone app's quick-action dial as a floating, movable desktop widget",
+  "main": "main.js",
+  "private": true
+}

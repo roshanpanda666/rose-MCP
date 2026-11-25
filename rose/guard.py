@@ -53,19 +53,27 @@ UNTRUSTED_TOOLS = {
     "browser_bookmarks",
     "schedule_list", "watch_status", "freellm_ask", "freellm_web_search", "screen_frame", "phone_screenshot",
     "workspace", "webcam_live_frame", "motion_events",
+    "memory_search", "memory_list", "git_status", "git_diff_summary", "git_log_today", "project_logs",
+    "explain_error", "claude_job_status", "activity_today", "standup", "list_projects",
+    "phone_contacts", "phone_ui_list", "phone_notifications", "phone_status",
 }
 
 # Mouse/keyboard control from a remote client needs approval, because a click can press "Send"
 # without any confirm step.
-GUI_TOOLS = {"mouse_click", "mouse_move", "click_on_screen", "scroll", "type_text", "press_keys", "ui_click", "ui_fill",
+GUI_TOOLS = {"hand_to_claude", "phone_call", "phone_message", "phone_click_text", "mouse_click", "mouse_move", "click_on_screen", "run_routine", "scroll", "type_text", "press_keys", "ui_click", "ui_fill",
              "browser_click", "browser_fill", "browser_press",
              # the phone (ADB): taps and typing can send messages; connecting grants control
-             "phone_connect", "phone_tap", "phone_swipe", "phone_type", "phone_key", "phone_open_app"}
+             "phone_connect", "phone_tap", "phone_swipe", "phone_type", "phone_key", "phone_open_app",
+             "phone_volume", "phone_media", "phone_setting", "phone_screen", "phone_notifications",
+             "phone_call_control", "phone_alarm", "phone_open_url", "phone_scroll",
+             "phone_speak", "phone_stop_sound", "phone_power", "phone_lost_mode"}
 # Approving once opens a time-limited grant for that client (approval_grant_minutes, default 60):
 # until it expires, that client's actions don't ask again. Other clients still need their own approval.
 GRANT_FILE = ROSE_HOME / "approval_grant.json"
 # Always approval-gated for remote clients, whatever approval_required_tools says (camera access).
-ALWAYS_APPROVE = {"webcam_capture", "webcam_live_frame", "mic_live_start", "motion_watch_start"}
+ALWAYS_APPROVE = {"webcam_capture", "webcam_live_frame", "mic_live_start", "motion_watch_start",
+                  # the phone's camera, microphone and whereabouts
+                  "phone_location", "phone_photo", "phone_mic_record", "phone_lost_mode"}
 
 # Typical prompt-injection phrasing. A hit is a warning sign, not proof (and a miss proves nothing).
 INJECTION_PATTERNS = [

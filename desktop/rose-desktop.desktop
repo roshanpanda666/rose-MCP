@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=ROSE Desktop
+GenericName=ROSE control center
+Comment=ROSE dashboard, phone control and mirror
+Exec=/home/roshan/0x/projects/rose-MCP/desktop/rose-desktop %U
+Icon=/home/roshan/.local/share/icons/hicolor/256x256/apps/rose.png
+Terminal=false
+Categories=Utility;
+StartupWMClass=rose-desktop
+Actions=phone;
+
+[Desktop Action phone]
+Name=Phone mirror
+Exec=/home/roshan/0x/projects/rose-MCP/desktop/rose-desktop --section=phone

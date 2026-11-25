@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'">
+<title>ROSE wheel</title>
+<link rel="stylesheet" href="../renderer/palettes.css">
+<link rel="stylesheet" href="wheel.css">
+<script src="../renderer/theme.js"></script>
+</head>
+<body>
+<button id="wheelBtn" class="wheel-btn" title="Quick actions: Super+C (drag to move)" aria-label="Quick actions" aria-expanded="false">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>
+</button>
+<div id="braveWheel" class="wheel" hidden><div class="wheel-dial" id="braveDial"><div class="wheel-ring" id="braveRing"></div></div></div>
+<div id="appsWheel" class="wheel" hidden><div class="wheel-dial" id="appsDial"><div class="wheel-ring" id="appsRing"></div></div></div>
+<div id="winWheel" class="wheel" hidden><div class="wheel-dial" id="winDial"><div class="wheel-ring" id="winRing"></div></div></div>
+<div id="lapWheel" class="wheel" hidden><div class="wheel-dial" id="lapDial"><div class="wheel-ring" id="lapRing"></div></div></div>
+<div id="themeWheel" class="wheel" hidden><div class="wheel-dial" id="themeDial"><div class="wheel-ring" id="themeRing"></div></div></div>
+<div id="powerWheel" class="wheel" hidden><div class="wheel-dial" id="powerDial"><div class="wheel-ring" id="powerRing"></div></div></div>
+<div id="wheel" class="wheel" hidden><div class="wheel-dial" id="wheelDial"><div class="wheel-ring" id="wheelRing"></div></div></div>
+<script src="icons.js"></script>
+<script src="wheel.js"></script>
+</body>
+</html>

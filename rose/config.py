@@ -59,9 +59,23 @@ DEFAULT_CONFIG = {
     "max_output_chars": 12000,
     "large_output_chars": 4000,
     "disabled_tools": [],
+    "companion_url": "http://127.0.0.1:8790",
+    "companion_env_file": "~/0x/projects/rose-phone-app/backend/.env",
     "live_view_min_side": 1920,
     "live_view_min_quality": 75,
     "commands": {},
+    "projects_root": "~/0x",
+    "face_hotkey": "ctrl+alt+r",
+    "refresh_reuse_grace_seconds": 60,
+    "activity_enabled": True,
+    "activity_summary_time": "23:00",
+    "activity_keep_days": 90,
+    "git_author_email": "",
+    "context_triggers": [{"when": "monitor_connected", "routine": "work", "ask": True}],
+    "phone_app_url": "https://debian.tail41061c.ts.net",
+    "claude_push_enabled": True,
+    "claude_job_timeout": 1800,
+    "phone_country_code": "91",
 }
 
 _COMMENTS = {
@@ -69,6 +83,7 @@ _COMMENTS = {
     "tunnel_provider": 'Public tunnel: "ngrok" (permanent URL) or "cloudflare" (quick tunnel, URL changes)',
     "ngrok_domain": 'Your free ngrok static domain, e.g. "abc-def-123.ngrok-free.app"',
     "allowed_dirs": "Folders the file tools may read and write",
+    "projects_root": "Where the user's projects live (open_project finds them by name; files here open in VS Code)",
     "max_read_bytes": "read_file and content search skip files bigger than this",
     "input_enabled": "Set false to turn off mouse and keyboard control",
     "webcam_device": 'Default camera for webcam_capture, e.g. "/dev/video0" ("" = first camera)',
@@ -97,6 +112,19 @@ _COMMENTS = {
     "max_output_chars": "Cap on the text a tool returns to the model (longer output is cut with a note; 0 = no cap)",
     "large_output_chars": "Log tool outputs bigger than this to ~/rose/logs/output-*.jsonl (see `rose tokens`)",
     "disabled_tools": 'Tools ROSE should not offer at all, e.g. ["webcam_capture", "lock_screen"]',
+    "companion_url": "Rose's brain for `rose face` (the rose-phone backend)",
+    "face_hotkey": 'Global hotkey for `rose face`: show Rose, open her chat, push-to-talk ("" = off). GNOME keeps Super+<key> for itself: bind a GNOME shortcut to `rose face --talk` instead',
+    "refresh_reuse_grace_seconds": "Seconds a just-rotated OAuth refresh token may be re-sent by the same client (retries) and get the same tokens back (0 = off)",
+    "activity_enabled": "Log the active window (app/project) every 30 s for activity_today / standup; nothing is logged while idle or locked",
+    "activity_summary_time": "Daily work-log push to your phone (24-hour HH:MM)",
+    "activity_keep_days": "Delete work-log files older than this",
+    "git_author_email": "Email whose commits standup counts (empty = git config user.email)",
+    "context_triggers": 'Run or offer routines on context changes. when: "monitor_connected" | "monitor_disconnected" | "wifi:<SSID>" | "app_opened:<name>"; ask=true pushes a confirm link to the phone app; optional cooldown_minutes (default 30)',
+    "phone_app_url": "Phone app base URL (trigger confirm links)",
+    "claude_push_enabled": "Push to the phone when Claude Code finishes or needs you (Claude Code hooks)",
+    "phone_country_code": "Country code added to phone numbers saved without one (phone_call / phone_message)",
+    "claude_job_timeout": "Max seconds for a background Claude Code job (hand_to_claude mode=background)",
+    "companion_env_file": "File with that backend's APP_TOKEN (read by `rose face`)",
     "live_view_min_side": "Live screen view (screen_frame): frames are at least this many px on the long side (1920 = native, sharpest)",
     "live_view_min_quality": "Live screen view: minimum JPEG quality (30-90; higher = sharper text, bigger frames)",
     "commands": ('Command presets Rose can run by name (no shell, no arguments), e.g.\n'
@@ -113,6 +141,8 @@ def _toml_value(v: Any) -> str:
         return json.dumps(v)  # JSON string escaping is valid TOML basic-string escaping
     if isinstance(v, list):
         return "[\n" + "".join(f"  {_toml_value(x)},\n" for x in v) + "]"
+    if isinstance(v, dict):  # inline table, e.g. one context trigger
+        return "{ " + ", ".join(f"{json.dumps(str(k))} = {_toml_value(x)}" for k, x in v.items()) + " }"
     raise TypeError(f"Can't write {type(v).__name__} to TOML")
 
 

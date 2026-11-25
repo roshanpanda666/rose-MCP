@@ -345,17 +345,17 @@ def do_boxes(req):
         return {"elements": []}
     out = []
     for app, w in wins:
-        out += _boxes_of(app, w)
+        out += _boxes_of(app, w, req.get("unnamed", False))
     return {"elements": out}
 
 
-def _boxes_of(app, w):
+def _boxes_of(app, w, unnamed=False):
     nodes = []
     walk(w, "", nodes, 4000, visible_only=True)
     out = []
     for p, n in nodes:
         nm = _name(n)
-        if not nm or len(nm) > 120:
+        if len(nm) > 120 or (not nm and not (unnamed and _role(n) in ACTIONABLE)):
             continue
         try:
             ext = n.get_extents(Atspi.CoordType.SCREEN)

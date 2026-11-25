@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import time
 import urllib.request
 from itertools import count
 from pathlib import Path
 from urllib.parse import urlparse
 
-from rose.common import ToolError, display_env
+from rose.common import ToolError, launch_detached
 from rose.config import load_config
 
 PROFILE = Path.home() / ".config" / "rose-browser"
@@ -125,7 +124,7 @@ def browser_start(url: str = "") -> str:
            f"--user-data-dir={PROFILE}", "--no-first-run", "--no-default-browser-check", "--class=ROSE-Browser"]
     if url:
         cmd.append(_check_url(url))
-    subprocess.Popen(cmd, env=display_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    launch_detached(cmd, name="rose-browser")
     for _ in range(40):
         if _running():
             return "Started ROSE's browser" + (f" on {url}" if url else "") + "."

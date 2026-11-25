@@ -8,12 +8,13 @@ import os
 import re
 import signal
 import subprocess
+import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
-from rose.common import ToolError, display_env, run, run_text
+from rose.common import ToolError, display_env, launch_detached, run, run_text
 from rose.config import load_config
 
 MAX_OUTPUT = 8000
@@ -208,8 +209,15 @@ def open_path(path: str) -> str:
     p = _resolve(path)
     if not p.exists():
         raise ToolError(f"{p} doesn't exist.")
-    subprocess.Popen(["xdg-open", str(p)], env=display_env(), stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+    from rose.tools import projects
+    if projects.in_projects(p) and shutil.which("code"):  # the user's code (~/0x) opens in VS Code
+        if p.is_dir():
+            projects.open_in_code(p)
+        else:  # the file's project as the workspace, the file in a tab
+            root = next((d for d in p.parents if projects.in_projects(d) and projects._is_project(d)), p.parent)
+            projects.open_in_code(root, p)
+        return f"Opened {p} in VS Code."
+    launch_detached(["xdg-open", str(p)], name="open")
     return f"Opened {p}."
 
 

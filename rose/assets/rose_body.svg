@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 720" width="420" height="720">
+  <!-- Rose's full body (chibi proportions), same coordinates as rose_avatar.svg. Shown in the "Full body" view:
+       the bust's broad shoulders are hidden and this sits behind her neck and head. Parts that move have ids. -->
+  <defs>
+    <linearGradient id="gSkirt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7a2350"/><stop offset="1" stop-color="#3d0f28"/>
+    </linearGradient>
+    <linearGradient id="gLeg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f2c1ae"/><stop offset=".45" stop-color="#ffe2d4"/><stop offset="1" stop-color="#efb29d"/>
+    </linearGradient>
+    <linearGradient id="gTorso" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2246"/><stop offset="1" stop-color="#1c1024"/>
+    </linearGradient>
+  </defs>
+  <g id="fullbody">
+    <!-- long hair falling down her back -->
+    <path id="fb-hair" d="M70 418 L350 418 C348 450 330 476 300 486 Q210 500 120 486 C90 476 72 450 70 418 Z" fill="#2e0b1f"/>
+    <!-- ground shadow -->
+    <ellipse id="fb-shadow" cx="210" cy="700" rx="70" ry="9" fill="#000" opacity=".22"/>
+    <!-- legs -->
+    <g id="fb-legs">
+      <g id="fb-leg-L">
+        <path d="M172 556 L170 676 Q182 682 194 676 L196 556 Z" fill="url(#gLeg)"/>
+        <path d="M170.6 606 L170 676 Q182 682 194 676 L194.8 606 Z" fill="#1d0b17"/>
+        <path d="M170.6 606 L194.8 606" stroke="#ff4f8b" stroke-width="2.5"/>
+        <path d="M160 686 Q160 672 176 671 L194 672 Q200 680 196 690 L166 692 Q160 691 160 686 Z" fill="#2a1020"/>
+        <path d="M166 678 Q176 674 188 675" stroke="#ff4f8b" stroke-width="2" fill="none" stroke-linecap="round"/>
+      </g>
+      <g id="fb-leg-R">
+        <path d="M224 556 L226 676 Q238 682 250 676 L248 556 Z" fill="url(#gLeg)"/>
+        <path d="M225.2 606 L226 676 Q238 682 250 676 L249.4 606 Z" fill="#1d0b17"/>
+        <path d="M225.2 606 L249.4 606" stroke="#ff4f8b" stroke-width="2.5"/>
+        <path d="M260 686 Q260 672 244 671 L226 672 Q220 680 224 690 L254 692 Q260 691 260 686 Z" fill="#2a1020"/>
+        <path d="M254 678 Q244 674 232 675" stroke="#ff4f8b" stroke-width="2" fill="none" stroke-linecap="round"/>
+      </g>
+    </g>
+    <!-- arms hanging at her sides (sleeve, forearm, hand); they swing a little -->
+    <g id="fb-arm-L">
+      <path d="M156 372 Q138 410 132 448" fill="none" stroke="#2c1b36" stroke-width="24" stroke-linecap="round"/>
+      <path d="M134 440 L128 458" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+      <path d="M131 456 Q128 470 128 476" fill="none" stroke="#e2a892" stroke-width="16" stroke-linecap="round"/>
+      <path d="M131 456 Q128 470 128 476" fill="none" stroke="#ffd9c7" stroke-width="12.5" stroke-linecap="round"/>
+      <ellipse cx="128" cy="486" rx="10" ry="11.5" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+      <path d="M124 492 Q128 495 132 492" stroke="#d9917f" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+    </g>
+    <g id="fb-arm-R">
+      <path d="M264 372 Q282 410 288 448" fill="none" stroke="#2c1b36" stroke-width="24" stroke-linecap="round"/>
+      <path d="M286 440 L292 458" stroke="#ff4f8b" stroke-width="3" stroke-linecap="round"/>
+      <path d="M289 456 Q292 470 292 476" fill="none" stroke="#e2a892" stroke-width="16" stroke-linecap="round"/>
+      <path d="M289 456 Q292 470 292 476" fill="none" stroke="#ffd9c7" stroke-width="12.5" stroke-linecap="round"/>
+      <ellipse cx="292" cy="486" rx="10" ry="11.5" fill="#ffd9c7" stroke="#e2a892" stroke-width="2"/>
+      <path d="M288 492 Q292 495 296 492" stroke="#d9917f" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+    </g>
+    <!-- skirt -->
+    <g id="fb-skirt">
+      <path d="M146 458 L274 458 L308 552 Q210 572 112 552 Z" fill="url(#gSkirt)"/>
+      <path d="M178 466 L164 560 M210 466 L210 566 M242 466 L256 560" stroke="#2e0b1f" stroke-width="2.5" opacity=".55" fill="none"/>
+      <path d="M112 552 Q210 572 308 552" stroke="#ff4f8b" stroke-width="3" fill="none" stroke-linecap="round"/>
+    </g>
+    <!-- top -->
+    <g id="fb-torso">
+      <path d="M168 350 Q210 366 252 350 C266 354 274 364 276 380 L280 466 Q210 480 140 466 L144 380 C146 364 154 354 168 350 Z" fill="url(#gTorso)"/>
+      <path d="M150 386 Q176 400 172 440 M270 386 Q244 400 248 440" stroke="#4a2d5a" stroke-width="2" fill="none" opacity=".6"/>
+      <rect x="140" y="452" width="140" height="12" rx="5" fill="#1d0b17"/>
+      <path d="M200 452 L210 462 L220 452 L216 466 L204 466 Z" fill="#ff4f8b"/>
+      <circle cx="210" cy="458" r="3.5" fill="#ffd36e"/>
+    </g>
+  </g>
+</svg>

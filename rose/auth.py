@@ -58,6 +58,15 @@ MAX_FAILURES = 5  # wrong passphrases ...
 LOCKOUT_WINDOW = 15 * 60  # ... within this window lock the login page for this long
 
 DEFAULT_REDIRECT_HOSTS = ["claude.ai", "claude.com", "localhost", "127.0.0.1"]
+DEFAULT_REUSE_GRACE = 60  # seconds a just-rotated refresh token may be re-sent by the same client
+
+
+def _reuse_grace() -> float:
+    """Config `refresh_reuse_grace_seconds` (default 60; 0 turns the grace off)."""
+    try:
+        return max(0.0, float(load_config().get("refresh_reuse_grace_seconds", DEFAULT_REUSE_GRACE)))
+    except (TypeError, ValueError):
+        return float(DEFAULT_REUSE_GRACE)
 
 
 def _h(token: str) -> str:
@@ -139,6 +148,7 @@ class RoseOAuthProvider:
         self._pending: dict[str, tuple[float, str, AuthorizationParams]] = {}  # id -> (expiry, client_id, params)
         self._codes: dict[str, AuthorizationCode] = {}
         self._failures: list[float] = []
+        self._rotated: dict[str, dict] = {}  # old refresh hash -> pair it was rotated into (memory only)
 
     # --- clients ---
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
@@ -217,20 +227,45 @@ class RoseOAuthProvider:
             return c
         return None
 
-    def _issue(self, client_id: str, scopes: list[str], resource: str | None) -> OAuthToken:
+    @staticmethod
+    def _add_tokens(s: dict, client_id: str, scopes: list[str], resource: str | None) -> OAuthToken:
+        """Create a fresh access/refresh pair in state `s` (caller holds _lock and saves)."""
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         now = int(time.time())
-        with _lock:
-            s = load_state()
-            s["access"] = {k: v for k, v in s["access"].items() if v["expires_at"] > now}
-            s["refresh"] = {k: v for k, v in s["refresh"].items() if v["expires_at"] > now}
-            s["access"][_h(access)] = {"client_id": client_id, "scopes": scopes, "resource": resource,
-                                       "expires_at": now + ACCESS_TTL}
-            s["refresh"][_h(refresh)] = {"client_id": client_id, "scopes": scopes, "resource": resource,
-                                         "expires_at": now + REFRESH_TTL}
-            save_state(s)
+        s["access"] = {k: v for k, v in s["access"].items() if v["expires_at"] > now}
+        s["refresh"] = {k: v for k, v in s["refresh"].items() if v["expires_at"] > now}
+        s["access"][_h(access)] = {"client_id": client_id, "scopes": scopes, "resource": resource,
+                                   "expires_at": now + ACCESS_TTL}
+        s["refresh"][_h(refresh)] = {"client_id": client_id, "scopes": scopes, "resource": resource,
+                                     "expires_at": now + REFRESH_TTL}
         return OAuthToken(access_token=access, token_type="Bearer", expires_in=ACCESS_TTL,
                           scope=" ".join(scopes), refresh_token=refresh)
+
+    def _issue(self, client_id: str, scopes: list[str], resource: str | None) -> OAuthToken:
+        with _lock:
+            s = load_state()
+            tok = self._add_tokens(s, client_id, scopes, resource)
+            save_state(s)
+        return tok
+
+    # --- refresh-token reuse grace ---
+    # Clients sometimes send the refresh token they just rotated a second time (a retry after a lost
+    # response, or two requests racing). Within a short grace window, the SAME client gets back the exact
+    # pair that rotation issued (idempotent) instead of being treated as token theft and forced to sign in
+    # again. The issued pair is kept in memory only (never written to disk) and only while it is unused.
+    def _replayable(self, s: dict, client_id: str, token: str) -> dict | None:
+        grace = _reuse_grace()
+        now = time.time()
+        self._rotated = {k: v for k, v in self._rotated.items() if now - v["at"] <= grace}
+        r = self._rotated.get(_h(token))
+        if not r or r["client_id"] != client_id:
+            return None
+        issued: OAuthToken = r["token"]
+        # Only while the issued pair is still live: once the client has used (or anyone has revoked) the new
+        # refresh token, the old one is plain reuse again.
+        if _h(issued.refresh_token or "") not in s["refresh"] or _h(issued.access_token) not in s["access"]:
+            return None
+        return r
 
     async def exchange_authorization_code(self, client, authorization_code: AuthorizationCode) -> OAuthToken:
         if self._codes.pop(authorization_code.code, None) is None:
@@ -238,24 +273,43 @@ class RoseOAuthProvider:
         return self._issue(client.client_id, authorization_code.scopes, authorization_code.resource)
 
     async def load_refresh_token(self, client, refresh_token: str):
-        r = load_state()["refresh"].get(_h(refresh_token))
+        s = load_state()
+        r = s["refresh"].get(_h(refresh_token))
         if r and r["client_id"] == client.client_id and r["expires_at"] > time.time():
             return RefreshToken(token=refresh_token, client_id=r["client_id"], scopes=r["scopes"],
                                 expires_at=r["expires_at"], resource=r.get("resource"), subject="owner")
+        g = self._replayable(s, client.client_id, refresh_token)  # just rotated: same client retrying
+        if g:
+            return RefreshToken(token=refresh_token, client_id=g["client_id"], scopes=g["scopes"],
+                                expires_at=g["expires_at"], resource=g["resource"], subject="owner")
         return None
 
     async def exchange_refresh_token(self, client, refresh_token: RefreshToken, scopes: list[str]) -> OAuthToken:
         with _lock:
             s = load_state()
-            if s["refresh"].pop(_h(refresh_token.token), None) is None:  # rotate: old one is single-use
+            old = s["refresh"].pop(_h(refresh_token.token), None)
+            if old is None:  # rotate: old one is single-use
+                g = self._replayable(s, client.client_id, refresh_token.token)
+                if g:  # same client re-sent it within the grace window: hand back the same pair
+                    print(f"ROSE auth: refresh token re-sent by {client_label(client.client_id)} within "
+                          f"{_reuse_grace():g}s: returned the same tokens", file=sys.stderr, flush=True)
+                    issued: OAuthToken = g["token"]
+                    left = int(s["access"][_h(issued.access_token)]["expires_at"] - time.time())
+                    return issued.model_copy(update={"expires_in": max(1, left)})
                 # Logged (client label only, never the token): a reused refresh token forces the client to sign in
                 # again, so this line explains a "something went wrong, sign in again" in Claude.
                 print(f"ROSE auth: refresh token REUSED by {client_label(client.client_id)}: client must sign in again",
                       file=sys.stderr, flush=True)
                 raise TokenError(error="invalid_grant", error_description="Refresh token already used")
+            tok = self._add_tokens(s, client.client_id, scopes or refresh_token.scopes, refresh_token.resource)
             save_state(s)
+            if _reuse_grace() > 0:
+                self._rotated[_h(refresh_token.token)] = {
+                    "client_id": client.client_id, "at": time.time(), "token": tok,
+                    "scopes": refresh_token.scopes, "resource": refresh_token.resource,
+                    "expires_at": old["expires_at"]}
         print(f"ROSE auth: refreshed tokens for {client_label(client.client_id)}", file=sys.stderr, flush=True)
-        return self._issue(client.client_id, scopes or refresh_token.scopes, refresh_token.resource)
+        return tok
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         s = load_state()

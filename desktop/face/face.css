@@ -1,0 +1,54 @@
+:root { --accent: #ff4f8b; --ink: #f6eef3; --card: rgba(28, 22, 36, 0.94); }
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none;
+  font: 13px/1.35 "Inter", "Cantarell", "DejaVu Sans", system-ui, sans-serif; }
+
+/* Rose: bottom centre of the 260x330 window; room above for her hop and her speech bubble */
+.rose { position: absolute; left: 76px; top: 170px; width: 108px; height: 156px; cursor: pointer;
+  transform: translateY(var(--lift, 0px)); will-change: transform; }
+.rose.dragging { cursor: grabbing; }
+.svgbox { position: absolute; inset: 0;
+  /* soft round bottom instead of a hard cut at the shoulders */
+  -webkit-mask-image: radial-gradient(120% 100% at 50% 0%, #000 90%, transparent 100%);
+  mask-image: radial-gradient(120% 100% at 50% 0%, #000 90%, transparent 100%); }
+.svgbox.full { -webkit-mask-image: none; mask-image: none; }
+.svgbox svg { width: 100%; height: 100%; display: block; overflow: visible; }
+
+/* a soft glow in her mood colour behind her head (inside her outline, so it never eats clicks) */
+.halo { position: absolute; left: 14px; top: 10px; width: 80px; height: 80px; border-radius: 50%;
+  background: radial-gradient(circle, var(--glow, rgba(255, 79, 139, .0)) 0%, transparent 70%);
+  transition: background .6s ease; pointer-events: none; }
+
+.badge { position: absolute; right: 8px; top: 40px; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box;
+  border-radius: 9px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px;
+  text-align: center; box-shadow: 0 2px 6px rgba(0,0,0,.35); animation: pop .35s ease-out; }
+
+/* particles: notes, z, sparkles, hearts, thinking dots */
+.fx { position: absolute; inset: -30px 0 0 0; pointer-events: none; }
+.p { position: absolute; top: 34px; font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,.45);
+  animation: float 2.2s ease-out forwards; }
+.p.notes { color: #ffb347; font-size: 15px; } .p.notes:nth-child(2n) { color: #fff; }
+.p.z { color: #9fb3ff; font-size: 14px; animation-duration: 3s; }
+.p.sparkle { color: #ffd36e; font-size: 13px; }
+.p.hearts { color: #ff4f8b; font-size: 14px; }
+.p.bang { color: #ffb020; font-size: 20px; top: 36px; animation: bang 1s ease-out forwards; }
+@keyframes float { 0% { transform: translate(0, 0) scale(.6); opacity: 0; } 15% { opacity: 1; }
+  100% { transform: translate(var(--vx, 0px), -46px) scale(1.1); opacity: 0; } }
+@keyframes bang { 0% { transform: scale(.3); opacity: 0; } 30% { transform: scale(1.2); opacity: 1; } 100% { transform: scale(1); opacity: 0; } }
+.dots { position: absolute; right: 6px; top: 22px; display: flex; gap: 3px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: #fff; opacity: .9; box-shadow: 0 1px 2px rgba(0,0,0,.4);
+  animation: dot 1.2s infinite ease-in-out; }
+.dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes dot { 0%, 80%, 100% { transform: translateY(0); opacity: .35; } 40% { transform: translateY(-5px); opacity: 1; } }
+
+/* speech bubble above her head */
+.bubble { position: absolute; left: 10px; right: 10px; bottom: 166px; display: flex; justify-content: center; }
+.bubble[hidden] { display: none; }
+.bubble .b-text { position: relative; max-width: 236px; max-height: 96px; overflow: hidden; padding: 8px 12px;
+  border-radius: 14px; background: var(--card); color: var(--ink); border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 6px 18px rgba(0,0,0,.35); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; animation: pop .25s ease-out; cursor: pointer; }
+.bubble .b-text::after { content: ""; position: absolute; left: 50%; bottom: -7px; width: 12px; height: 12px; margin-left: -6px;
+  background: var(--card); border-right: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); transform: rotate(45deg); }
+.bubble.alert .b-text { border-color: #ffb020; }
+@keyframes pop { 0% { transform: scale(.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }

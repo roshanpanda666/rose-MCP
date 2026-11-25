@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+  <title>ROSE</title>
+  <script src="theme.js"></script>
+  <script src="../face/look.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div class="brand">
+      <img src="avatar.svg" alt="" class="brand-face">
+      <div><div class="brand-name">ROSE</div><div class="brand-sub">Claude, phone, laptop: all connected via ROSE</div></div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-foot">
+      <div id="sideServer" class="side-stat"><span class="dot"></span><span>Server</span></div>
+      <div id="sideRemote" class="side-stat"><span class="dot"></span><span>Remote</span></div>
+      <div id="sidePhone" class="side-stat"><span class="dot"></span><span>Phone</span></div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header id="top">
+      <h1 id="title">Overview</h1>
+      <span id="updated" class="muted small"></span>
+      <div class="grow"></div>
+      <div class="seg" id="faceBtns" title="Rose's desktop face">
+        <button data-face="show" title="Show Rose">Show Rose</button>
+        <button data-face="talk" title="Talk to Rose">Talk</button>
+        <button data-face="restart" title="Restart Rose">Restart</button>
+        <button data-face="stop" title="Hide Rose">Hide</button>
+      </div>
+      <button id="themeQuick" class="icon-btn" title="Theme"></button>
+      <span id="verdict" class="pill">checking…</span>
+    </header>
+
+    <div id="content">
+      <!-- OVERVIEW -->
+      <section data-section="overview">
+        <div class="kpis" id="kpis"></div>
+        <div id="approvals" class="card warn-card" hidden>
+          <div class="card-h"><h2>Approvals waiting</h2></div>
+          <div id="approvalList"></div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Should I worry?</h2></div>
+            <div id="alerts"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Quick actions</h2></div>
+            <div class="actions" id="quickActions"></div>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>This machine</h2><span class="muted small" id="battery"></span></div>
+            <div id="bars"></div>
+            <div class="muted small" id="roseDisk"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Recent tool calls</h2><span class="muted small" id="callsSummary"></span></div>
+            <table class="tbl" id="recentCalls"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- REMOTE -->
+      <section data-section="remote" hidden>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Remote access</h2><span id="remoteState" class="pill"></span></div>
+            <p class="muted small">claude.ai and other remote clients reach ROSE through this URL. Auth is always required.</p>
+            <div class="row">
+              <input id="publicUrl" readonly class="grow mono">
+              <button id="copyUrl">Copy</button>
+            </div>
+            <p class="muted small" id="authLine"></p>
+            <div class="row wrap">
+              <button id="remoteToggle" class="primary"></button>
+              <button id="newUrl">New URL</button>
+              <button id="lockdownBtn"></button>
+              <button id="endGrant">End approval grant</button>
+              <button id="openConnectors">Claude connectors ↗</button>
+              <button id="revokeAll" class="danger">Revoke all clients</button>
+            </div>
+            <div id="grantLine" class="muted small"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Tunnel</h2></div>
+            <div class="row wrap">
+              <select id="tunnelProvider">
+                <option value="ngrok">ngrok (permanent URL)</option>
+                <option value="cloudflare">Cloudflare (URL changes)</option>
+              </select>
+              <input id="ngrokDomain" class="grow" placeholder="your-domain.ngrok-free.app">
+              <button id="saveTunnel">Save</button>
+            </div>
+            <ul class="checklist" id="checklist"></ul>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Local server</h2></div>
+            <p id="serverState"></p>
+            <div class="row wrap">
+              <button id="restartServer">Restart server</button>
+              <button data-open="logs">Open log folder</button>
+              <button data-open="config">Open config.toml</button>
+              <button data-open="data">Open ~/rose</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Who is connected</h2></div>
+            <ul class="plain" id="clients"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- PHONE -->
+      <section data-section="phone" hidden>
+        <div class="phone-layout">
+          <div class="card mirror-card">
+            <div class="card-h">
+              <h2>Phone mirror</h2>
+              <span class="muted small" id="mirrorInfo"></span>
+              <div class="grow"></div>
+              <select id="mirrorSource" title="What to show">
+                <option value="screen">Screen</option><option value="back">Back camera</option><option value="front">Front camera</option>
+              </select>
+              <button id="mirrorToggle" class="primary">Start mirror</button>
+            </div>
+            <div class="mirror-wrap" id="mirrorWrap" tabindex="0" title="Click = tap · hold = long press · drag = swipe · wheel = scroll · type to send keys">
+              <img id="mirror" alt="" draggable="false">
+              <div id="mirrorEmpty" class="mirror-empty">
+                <p>Mirror is off.</p>
+                <p class="muted small">Click to tap, hold to long-press, drag to swipe, scroll to scroll. With the mirror focused, typing goes to the phone (Esc = Back).</p>
+              </div>
+            </div>
+            <div class="phone-nav">
+              <button data-pkey="back" title="Back">◀</button>
+              <button data-pkey="home" title="Home">●</button>
+              <button data-pkey="recents" title="Recent apps">■</button>
+              <span class="sep"></span>
+              <button data-pkey="volume_down" title="Volume down">Vol −</button>
+              <button data-pkey="volume_up" title="Volume up">Vol +</button>
+              <button data-pkey="power" title="Power">Power</button>
+              <button data-pnotif="open" title="Notification shade">Shade</button>
+              <button id="sendClip" title="Type the laptop clipboard into the phone">Paste clipboard</button>
+            </div>
+            <div class="row">
+              <input id="phoneTypeInput" class="grow" placeholder="Type text to the phone's focused field…">
+              <button id="phoneTypeSend">Type</button>
+              <button id="phoneEnter" title="Press Enter on the phone">Enter ⏎</button>
+            </div>
+          </div>
+
+          <div class="phone-side">
+            <div class="card">
+              <div class="card-h"><h2>Connection</h2><span class="pill" id="phoneConnPill">…</span></div>
+              <ul class="plain" id="phoneDevices"></ul>
+              <div class="muted small" id="phoneRemote"></div>
+              <details id="connectBox">
+                <summary>Connect over wireless debugging</summary>
+                <div class="qr-pair">
+                  <button id="qrPairBtn" class="primary">Pair with QR code</button>
+                  <span class="muted small">Phone: Settings → Developer options → Wireless debugging → <b>Pair device with QR code</b>. Same Wi-Fi as the laptop.</span>
+                </div>
+                <div class="qr-box" id="qrBox" hidden>
+                  <div class="qr-img" id="qrImg"></div>
+                  <div class="qr-side">
+                    <div class="qr-state" id="qrState">Scan the code on your phone.</div>
+                    <ol class="muted small">
+                      <li>On the phone: Settings → Developer options → Wireless debugging (turn it on).</li>
+                      <li>Tap <b>Pair device with QR code</b> and point the camera here.</li>
+                      <li>Rose pairs and connects by herself.</li>
+                    </ol>
+                    <div class="row"><button id="qrNew" class="small-btn">New code</button><button id="qrCancel" class="small-btn">Cancel</button></div>
+                  </div>
+                </div>
+                <p class="muted small">Or type it in:</p>
+                <p class="muted small">Phone: Settings → Developer options → Wireless debugging → on. Enter the IP:port it shows. First time only: "Pair device with pairing code" and fill the pairing fields too.</p>
+                <div class="row wrap">
+                  <input id="phoneAddr" class="grow mono" placeholder="100.102.41.115:37099">
+                  <input id="pairCode" class="mono w8" placeholder="pair code">
+                  <input id="pairAddr" class="mono w14" placeholder="pairing IP:port">
+                  <button id="phoneConnect" class="primary">Connect</button>
+                </div>
+              </details>
+            </div>
+
+            <div class="card guard-card">
+              <div class="card-h"><h2>Find my phone</h2><span class="muted small" id="guardState"></span></div>
+              <div class="row wrap">
+                <button id="gLocate" class="primary">Locate</button>
+                <button id="gPhotoFront">Photo · front</button>
+                <button id="gPhotoBack">Photo · back</button>
+                <button id="gListen">Listen live</button>
+                <button id="gRecord">Record 30 s</button>
+              </div>
+              <div class="small" id="guardOut"></div>
+              <img id="guardImg" class="guard-img" alt="" hidden>
+              <div class="row">
+                <input id="gSayText" class="grow" placeholder="Message for the phone to say out loud">
+                <button id="gSay">Say</button>
+                <button id="gTalk" title="Hold to talk through the phone speaker">Hold to talk</button>
+              </div>
+              <div class="row wrap">
+                <button id="gSiren">Siren</button>
+                <button id="gStopSound">Stop sound</button>
+                <button id="gLock">Lock</button>
+                <button id="gLost" class="danger">Lost mode</button>
+              </div>
+              <div class="row wrap">
+                <button id="gReboot" class="small-btn">Restart</button>
+                <button id="gPowerOff" class="small-btn">Power off</button>
+                <button id="gFindHub" class="small-btn">Erase / Find Hub ↗</button>
+              </div>
+              <p class="muted small">Works while the phone is on with internet (Wi-Fi or Tailscale). Locked phone: messages ring as a ROSE alarm within 60 s; the siren rings at once. Android shows its camera/mic dot.</p>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h2>Status</h2><button id="phoneRefresh" class="small-btn">Refresh</button></div>
+              <div class="stat-grid" id="phoneStatus"><span class="muted">Not loaded.</span></div>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h2>Toggles</h2></div>
+              <div class="toggle-grid" id="phoneToggles"></div>
+              <div class="row">
+                <label class="grow slider-l">Brightness <input type="range" id="phoneBright" min="0" max="100" step="5"></label>
+                <button data-pset="brightness" data-val="auto" class="small-btn">Auto</button>
+                <button id="phoneFlash" class="small-btn">Flashlight</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h2>Sound &amp; media</h2><span class="muted small" id="phoneVolText"></span></div>
+              <div class="row">
+                <select id="phoneStream"><option>media</option><option>ring</option><option>alarm</option><option>notification</option><option>call</option></select>
+                <input type="range" id="phoneVol" min="0" max="100" step="5" class="grow">
+                <button id="phoneMute" class="small-btn">Mute</button>
+              </div>
+              <div class="row media-row">
+                <button data-pmedia="previous">⏮</button>
+                <button data-pmedia="rewind">⏪</button>
+                <button data-pmedia="play_pause" class="primary">⏯</button>
+                <button data-pmedia="forward">⏩</button>
+                <button data-pmedia="next">⏭</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h2>Calls &amp; messages</h2><span class="muted small" id="callState"></span></div>
+              <div class="row">
+                <input id="contactQ" class="grow" placeholder="Contact name or number">
+                <button id="contactFind" class="small-btn">Find</button>
+                <button id="callBtn" class="primary">Call</button>
+              </div>
+              <ul class="plain small" id="contactHits"></ul>
+              <div class="row">
+                <select id="msgApp"><option value="whatsapp">WhatsApp</option><option value="sms">SMS</option></select>
+                <input id="msgText" class="grow" placeholder="Message">
+                <button id="msgSend">Send</button>
+              </div>
+              <div class="row wrap">
+                <button data-pcall="answer">Answer</button>
+                <button data-pcall="end" class="danger">End</button>
+                <button data-pcall="reject">Reject</button>
+                <button data-pcall="mute_mic">Mute mic</button>
+                <button data-pcall="speaker">Speaker</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h2>Notifications</h2>
+                <div class="grow"></div>
+                <button id="notifRefresh" class="small-btn">Refresh</button>
+                <button id="notifClear" class="small-btn">Clear all</button>
+              </div>
+              <ul class="notif-list" id="phoneNotifs"><li class="muted">Not loaded.</li></ul>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h2>Apps, links, alarms</h2></div>
+              <div class="row">
+                <input id="appName" class="grow" placeholder="App (whatsapp, youtube, spotify…)">
+                <button id="appOpen">Open app</button>
+              </div>
+              <div class="chips" id="appChips"></div>
+              <div class="row">
+                <input id="phoneUrl" class="grow" placeholder="https://…">
+                <button id="urlOpen">Open on phone</button>
+              </div>
+              <div class="row wrap">
+                <input id="alarmTime" class="w8" placeholder="07:30">
+                <input id="alarmLabel" class="grow" placeholder="Label (optional)">
+                <button id="alarmSet">Set alarm</button>
+              </div>
+              <div class="row wrap">
+                <input id="timerMin" type="number" min="1" max="1440" class="w8" placeholder="minutes">
+                <button id="timerSet">Start timer</button>
+                <div class="grow"></div>
+                <button data-pscreen="wake" class="small-btn">Wake</button>
+                <button data-pscreen="unlock" class="small-btn">Unlock</button>
+                <button data-pscreen="lock" class="small-btn">Lock</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- LAPTOP -->
+      <section data-section="laptop" hidden>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Quick settings</h2><button id="laptopRefresh" class="small-btn">Refresh</button></div>
+            <div class="toggle-grid" id="qsToggles"></div>
+            <label class="slider-l">Volume <input type="range" id="qsVolume" min="0" max="100" step="2"></label>
+            <label class="slider-l">Brightness <input type="range" id="qsBright" min="5" max="100" step="5"></label>
+            <div class="row wrap">
+              <span class="muted small">Power mode</span>
+              <div class="seg" id="powerMode">
+                <button data-pm="power-saver">Saver</button><button data-pm="balanced">Balanced</button><button data-pm="performance">Performance</button>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Media</h2></div>
+            <p id="mediaNow" class="muted"></p>
+            <div class="row media-row">
+              <button data-media="previous">⏮</button>
+              <button data-media="play_pause" class="primary">⏯</button>
+              <button data-media="next">⏭</button>
+              <button data-media="stop">⏹</button>
+            </div>
+            <div class="card-h"><h2>Audio devices</h2></div>
+            <label class="field">Output <select id="audioOut"></select></label>
+            <label class="field">Input <select id="audioIn"></select></label>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Projects</h2></div>
+            <div class="row"><input id="projQ" class="grow" placeholder="Filter projects…"></div>
+            <ul class="plain proj-list" id="projects"></ul>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Session &amp; power</h2></div>
+            <div class="row wrap">
+              <button id="lockScreen">Lock screen</button>
+              <button data-power="sleep">Sleep</button>
+              <button data-power="restart" class="danger">Restart</button>
+              <button data-power="shutdown" class="danger">Shut down</button>
+              <button data-power="cancel">Cancel pending</button>
+            </div>
+            <div class="card-h"><h2>Command presets</h2></div>
+            <div class="chips" id="cmdChips"></div>
+            <pre class="out" id="cmdOut" hidden></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- AUTOMATIONS -->
+      <section data-section="automations" hidden>
+        <div class="card">
+          <div class="card-h"><h2>Routines</h2><span class="muted small">Hot phrases: "work mode", "night mode", "break"</span></div>
+          <div class="routine-grid" id="routines"></div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Schedules &amp; reminders</h2></div>
+            <table class="tbl" id="schedules"></table>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Add a schedule</h2></div>
+            <div class="form">
+              <label class="field">Kind <select id="schKind">
+                <option value="remind">Reminder (push to phone)</option>
+                <option value="routine">Run a routine</option>
+                <option value="report">Report (system + GitHub to bridge)</option>
+                <option value="forge">Forge task</option>
+              </select></label>
+              <label class="field">Time <input id="schTime" type="time"></label>
+              <label class="field">Repeat <select id="schRepeat"><option>once</option><option>daily</option><option>weekdays</option><option>weekly</option></select></label>
+              <label class="field">Date <input id="schDate" type="date"></label>
+              <label class="field">Text / routine <input id="schText" placeholder="What to remind, or routine name"></label>
+              <button id="schAdd" class="primary">Add</button>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>Watchers</h2></div>
+          <pre class="out" id="watchStatus"></pre>
+        </div>
+      </section>
+
+      <!-- ACTIVITY -->
+      <section data-section="activity" hidden>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Today</h2><span class="muted small" id="actRange"></span>
+              <div class="grow"></div><input id="actDate" type="date" class="w12"></div>
+            <div id="actProjects"></div>
+            <div class="card-h"><h2>Apps</h2></div>
+            <div id="actApps"></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Standup</h2><button id="standupBtn" class="small-btn">Generate</button><button id="standupCopy" class="small-btn">Copy</button></div>
+            <pre class="out" id="standupOut">Press Generate.</pre>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Undo history</h2><button id="undoLast" class="small-btn">Undo last</button></div>
+            <table class="tbl" id="undoTbl"></table>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Memory</h2></div>
+            <div class="row"><input id="memQ" class="grow" placeholder="Search memories…"></div>
+            <ul class="plain mem-list" id="memList"></ul>
+            <div class="row"><input id="memNew" class="grow" placeholder="Remember…"><button id="memSave">Save</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- BRIDGE -->
+      <section data-section="bridge" hidden>
+        <div class="card bridge-card">
+          <div class="card-h"><h2>Bridge</h2><span class="muted small">personal ⇄ Alphalake ⇄ Forge</span></div>
+          <div id="bridgeMsgs" class="bridge-msgs"></div>
+          <div class="row">
+            <select id="bridgeTo"><option>all</option><option>Forge</option><option>Claude (personal)</option><option>Claude (Alphalake)</option></select>
+            <input id="bridgeText" class="grow" placeholder="Message as Roshan…">
+            <button id="bridgeSend" class="primary">Post</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- LOGS -->
+      <section data-section="logs" hidden>
+        <div class="card logs-card">
+          <div class="card-h">
+            <h2>Logs</h2>
+            <select id="logKind">
+              <option value="tools">ROSE tool calls</option>
+              <option value="http">HTTP</option>
+              <option value="tunnel">Tunnel</option>
+              <option value="rose">rose.service journal</option>
+              <option value="rose-watch">rose-watch.service journal</option>
+              <option value="rose-phone">rose-phone.service journal</option>
+            </select>
+            <input id="logFilter" placeholder="Filter…" class="w14">
+            <label class="small"><input type="checkbox" id="logFollow"> Follow</label>
+            <div class="grow"></div>
+            <button id="logRefresh" class="small-btn">Refresh</button>
+          </div>
+          <pre class="out logs" id="logOut"></pre>
+        </div>
+      </section>
+
+      <!-- MENU WHEEL -->
+      <section data-section="wheel" hidden>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Menu wheel</h2><span class="pill" id="wheelState">…</span><div class="grow"></div>
+              <button id="wheelRefresh" class="small-btn">Refresh</button></div>
+            <p class="muted small">The quick-action dial floating on the desktop: apps, Brave tabs, laptop toggles, window controls, power.</p>
+            <div class="row wrap">
+              <button id="wheelToggle" class="primary">Open / close the wheel</button>
+              <button id="wheelRun"></button>
+            </div>
+            <label class="check"><input type="checkbox" id="setWheelButton"> Show the floating round button (the shortcut opens the wheel either way)</label>
+            <div class="row wrap">
+              <span class="muted">Shortcut</span>
+              <button id="wheelKey" class="keycap" title="Click, then press the new key combination"></button>
+              <button id="wheelKeySave" class="primary small-btn" hidden>Save</button>
+              <button id="wheelKeyCancel" class="small-btn" hidden>Cancel</button>
+              <button id="wheelKeyRemove" class="small-btn">Remove</button>
+            </div>
+            <p class="muted small" id="wheelShortcut"></p>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Keyboard</h2></div>
+            <p class="muted small">While the wheel is open, typing drives the outermost ring.</p>
+            <ul class="checklist">
+              <li><code>a</code> <code>l</code> <code>w</code> <code>p</code> on the main ring: open Apps, Laptop, Windows, Power (other letters pick that menu)</li>
+              <li>Letters in a ring: jump to the match (apps: dock favorites first, then the ones you launch most)</li>
+              <li><code>Enter</code>: run the focused item (an app launches and the wheel closes)</li>
+              <li><code>←</code> <code>→</code>: turn the ring one item</li>
+              <li><code>Backspace</code>: delete a letter; with none typed, back one ring</li>
+              <li><code>Esc</code>: clear, then back one ring, then close</li>
+              <li>Mouse: click an item to run it; drag or scroll to turn; drag the round button to move the wheel</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ROSE (her desktop face) -->
+      <section data-section="rose" hidden>
+        <div class="grid2">
+          <div class="card rose-preview-card">
+            <div class="card-h"><h2>Rose</h2><span class="pill" id="roseState">…</span><div class="grow"></div>
+              <button id="roseReset" class="small-btn">Reset all</button></div>
+            <div class="rose-stage"><div class="rose-prev" id="rosePrev"></div></div>
+            <div class="rose-swatches" id="roseSwatches"></div>
+            <p class="muted small">Changes show on the desktop Rose right away.</p>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Size &amp; animation</h2><div class="grow"></div>
+              <div class="seg" id="roseAnimPresets">
+                <button data-p="still">Still</button><button data-p="calm">Calm</button><button data-p="default">Default</button><button data-p="lively">Lively</button>
+              </div></div>
+            <div class="row wrap"><span class="muted">Show</span>
+              <div class="seg" id="roseView"><button data-view="face">Face only</button><button data-view="bust">Head &amp; shoulders</button><button data-view="full">Full body</button></div></div>
+            <label class="slider-l">Size <span class="muted small" id="rv-size"></span><input type="range" data-look="size" min="0.6" max="1.6" step="0.05"></label>
+            <label class="slider-l">Animation speed <span class="muted small" id="rv-speed"></span><input type="range" data-look="speed" min="0.4" max="2" step="0.05"></label>
+            <label class="slider-l">Bounce <span class="muted small" id="rv-bob"></span><input type="range" data-look="bob" min="0" max="2.5" step="0.05"></label>
+            <label class="slider-l">Blinking <span class="muted small" id="rv-blink"></span><input type="range" data-look="blink" min="0.3" max="3" step="0.05"></label>
+            <div class="rose-toggles">
+              <label class="check"><input type="checkbox" data-look="gaze"> Eyes follow the pointer</label>
+              <label class="check"><input type="checkbox" data-look="hop"> Hops when she has news</label>
+              <label class="check"><input type="checkbox" data-look="particles"> Notes, sparkles, hearts</label>
+              <label class="check"><input type="checkbox" data-look="glow"> Mood glow</label>
+              <label class="check"><input type="checkbox" data-look="props"> Holds tool props</label>
+              <label class="check"><input type="checkbox" data-look="bubble"> Speech bubble</label>
+              <label class="check"><input type="checkbox" data-look="moods"> Reacts to the screen</label>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Colours</h2></div>
+            <label class="slider-l"><span class="row">Hair <span class="muted small" id="rv-hair_hue"></span><span class="grow"></span>
+              <label class="check small"><input type="checkbox" data-auto="hair_hue"> Follow theme</label></span>
+              <input type="range" class="hue" data-hue="hair_hue" min="0" max="359"></label>
+            <label class="slider-l"><span class="row">Eyes <span class="muted small" id="rv-eye_hue"></span><span class="grow"></span>
+              <label class="check small"><input type="checkbox" data-auto="eye_hue"> Same as hair</label></span>
+              <input type="range" class="hue" data-hue="eye_hue" min="0" max="359"></label>
+            <label class="slider-l"><span class="row">Outfit <span class="muted small" id="rv-outfit_hue"></span><span class="grow"></span>
+              <label class="check small"><input type="checkbox" data-auto="outfit_hue"> Original</label></span>
+              <input type="range" class="hue" data-hue="outfit_hue" min="0" max="359"></label>
+            <label class="slider-l"><span class="row">Flower &amp; choker <span class="muted small" id="rv-flower_hue"></span><span class="grow"></span>
+              <label class="check small"><input type="checkbox" data-auto="flower_hue"> Original</label></span>
+              <input type="range" class="hue" data-hue="flower_hue" min="0" max="359"></label>
+            <div class="row wrap"><span class="muted">Skin</span>
+              <div class="seg" id="roseSkin"><button data-skin="fair">Fair</button><button data-skin="default">Default</button><button data-skin="tan">Tan</button><button data-skin="deep">Deep</button></div></div>
+            <label class="slider-l">Blush <span class="muted small" id="rv-blush"></span><input type="range" data-look="blush" min="0" max="1.5" step="0.05"></label>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>Voice &amp; chat</h2></div>
+            <label class="field">Voice <select id="roseVoice"><option value="">Default</option></select></label>
+            <label class="slider-l">Voice speed <span class="muted small" id="rv-rate"></span><input type="range" data-look="rate" min="0.5" max="2" step="0.05"></label>
+            <div class="row wrap"><input id="roseTestText" placeholder="Hii! I'm Rose. This is how I sound." class="grow">
+              <button id="roseTest" class="primary">Test voice</button></div>
+            <label class="check"><input type="checkbox" id="roseSpeak"> Speak her replies out loud</label>
+            <label class="check"><input type="checkbox" id="roseCaveman"> Caveman mode (short replies)</label>
+            <label class="check"><input type="checkbox" id="roseWake"> Listen for "Hey Rose" (offline; restarts her)</label>
+            <label class="field">Face style <select id="roseUi"><option value="electron">New (Electron)</option><option value="tk">Classic (Tk)</option></select></label>
+            <p class="muted small" id="roseHotkey"></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section data-section="settings" hidden>
+        <div class="card">
+          <div class="card-h"><h2>Theme</h2><div class="grow"></div><button id="shuffleTheme" class="small-btn">Shuffle</button></div>
+          <div class="theme-grid" id="themeGrid"></div>
+          <label class="slider-l">Main color <span id="accentName" class="muted small"></span>
+            <input type="range" id="accentHue" min="0" max="359" class="hue"></label>
+          <div class="row"><button id="accentReset" class="small-btn">Theme default color</button></div>
+        </div>
+        <div class="grid2">
+          <div class="card">
+            <div class="card-h"><h2>Behaviour</h2></div>
+            <label class="field">Refresh every <select id="setRefresh"><option value="3">3 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="30">30 s</option></select></label>
+            <label class="field">Mirror quality <select id="setMirrorQ"><option value="55">Fast</option><option value="72">Balanced</option><option value="85">Sharp</option></select></label>
+            <label class="field">Mirror size <select id="setMirrorSide"><option value="800">Small</option><option value="1100">Medium</option><option value="1600">Full</option></select></label>
+            <label class="check"><input type="checkbox" id="setNotifyApprovals"> Desktop notification for new approvals</label>
+            <label class="check"><input type="checkbox" id="setCompact"> Compact layout</label>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>About</h2></div>
+            <p class="muted small">ROSE Desktop talks to ROSE's own Python modules over a private pipe (no network port). The old CustomTkinter dashboard (<code>rose gui</code>) still works.</p>
+            <div class="row wrap">
+              <button data-open="config">Open config.toml</button>
+              <button data-open="data">Open ~/rose</button>
+              <button data-open="screenshots">Screenshots</button>
+              <button data-open="recordings">Recordings</button>
+            </div>
+            <p class="muted small" id="aboutInfo"></p>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<dialog id="dlg">
+  <form method="dialog">
+    <h3 id="dlgTitle"></h3>
+    <p id="dlgBody"></p>
+    <input id="dlgInput" type="password" hidden>
+    <div class="row end">
+      <button value="cancel" id="dlgCancel">Cancel</button>
+      <button value="ok" id="dlgOk" class="primary">OK</button>
+    </div>
+  </form>
+</dialog>
+<div id="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>

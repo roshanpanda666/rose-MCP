@@ -1,0 +1,7 @@
+{
+  "name": "rose-face",
+  "version": "1.0.0",
+  "description": "Rose's animated desktop face and chat (Electron), started by `rose face`",
+  "main": "main.js",
+  "private": true
+}

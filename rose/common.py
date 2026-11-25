@@ -104,6 +104,19 @@ def display_env() -> dict[str, str]:
     return env
 
 
+def launch_detached(cmd: list[str], cwd: str | None = None, name: str = "") -> subprocess.Popen:
+    """Start a desktop app in its own systemd --user scope, so it never lives in rose.service's cgroup
+    (a ROSE restart would otherwise kill it: KillMode=control-group). Falls back to a plain detached process."""
+    env = display_env()
+    full = list(cmd)
+    if shutil.which("systemd-run") and os.environ.get("ROSE_NO_SCOPE") != "1":
+        tag = "".join(c if c.isalnum() else "-" for c in (name or os.path.basename(cmd[0])))[:40].strip("-") or "app"
+        full = ["systemd-run", "--user", "--scope", "--collect", "--quiet",
+                f"--unit=app-rose-{tag}-{os.getpid()}-{time.monotonic_ns()}", "--", *cmd]
+    return subprocess.Popen(full, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def require(binary: str, hint: str) -> str:
     """Path of `binary`, or a ToolError telling the user how to install it."""
     path = shutil.which(binary)

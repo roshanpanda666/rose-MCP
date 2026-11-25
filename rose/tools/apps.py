@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import configparser
 import os
-import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from rose.common import ToolError, display_env, require, session_type
+from rose.common import ToolError, display_env, launch_detached, require, session_type
 
 # ---------- apps ----------
 
@@ -94,8 +93,7 @@ def open_app(app: str) -> str:
         else:
             raise ToolError(f"No installed app matches '{app}'. Use list_apps to see what's available.")
     require("gtk-launch", "sudo apt install libgtk-3-bin")
-    subprocess.Popen(["gtk-launch", match], env=display_env(), stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+    launch_detached(["gtk-launch", match], name=match)
     return f"Launched {apps[match]} ({match})."
 
 
@@ -104,8 +102,7 @@ def open_url(url: str) -> str:
     u = urlparse(url if "://" in url else "https://" + url)
     if u.scheme not in ("http", "https") or not u.netloc:
         raise ToolError("Only http:// and https:// URLs can be opened.")
-    subprocess.Popen(["xdg-open", u.geturl()], env=display_env(), stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, start_new_session=True)
+    launch_detached(["xdg-open", u.geturl()], name="browser")
     return f"Opened {u.geturl()} in the default browser."
 
 

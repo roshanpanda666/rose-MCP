@@ -69,9 +69,10 @@ def test_passphrase_and_redirects(auth_state):
     assert not auth.redirect_host_allowed("https://evil.example/cb")
 
 
-def test_tokens_and_refresh_rotation(auth_state):
+def test_tokens_and_refresh_rotation(auth_state, monkeypatch):
     from mcp.shared.auth import OAuthClientInformationFull
 
+    monkeypatch.setattr(auth, "_reuse_grace", lambda: 0.0)  # grace replay is covered in test_auth_grace.py
     _, static = auth_state
     p = auth.RoseOAuthProvider("http://testserver")
     assert asyncio.run(p.load_access_token(static)).client_id == "static:tests"

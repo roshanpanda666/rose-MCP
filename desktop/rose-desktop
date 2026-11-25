@@ -1,0 +1,5 @@
+#!/bin/sh
+# Launch ROSE Desktop (Electron). Pass --section=phone etc. to open a page.
+unset ELECTRON_RUN_AS_NODE
+DIR="$(dirname "$(readlink -f "$0")")"
+exec "$DIR/node_modules/electron/dist/electron" "$DIR" "$@"

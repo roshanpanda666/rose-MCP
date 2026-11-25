@@ -67,10 +67,20 @@ class RoseGUI(ctk.CTk):
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=18, pady=(14, 6))
         ctk.CTkLabel(top, text="ROSE", font=ctk.CTkFont(size=26, weight="bold")).pack(side="left")
-        ctk.CTkLabel(top, text="  your machine, for Claude", text_color=MUTED).pack(side="left", pady=(8, 0))
+        ctk.CTkLabel(top, text="  Claude, phone, laptop: all connected via ROSE", text_color=MUTED).pack(side="left", pady=(8, 0))
         self.verdict = ctk.CTkLabel(top, text="checking…", corner_radius=14, fg_color=("#e5e7eb", "#374151"),
                                     font=ctk.CTkFont(size=14, weight="bold"), padx=14, pady=4)
         self.verdict.pack(side="right")
+        rose_btns = ctk.CTkFrame(top, fg_color="transparent")
+        rose_btns.pack(side="right", padx=(0, 10))
+        for label, args, color in (("Hey Rose: on", ["rose", "face", "--wake", "on"], "#0e7490"),
+                                   ("Hey Rose: off", ["rose", "face", "--wake", "off"], "#374151"),
+                                   ("Show Rose", ["rose", "face"], "#e0577f"),
+                                   ("Restart Rose", ["rose", "face", "--restart"], "#7c3aed"),
+                                   ("Hide Rose", ["rose", "face", "--stop"], "#4b5563")):
+            ctk.CTkButton(rose_btns, text=label, width=96, fg_color=color,
+                          command=lambda a=args: subprocess.Popen(a, start_new_session=True)).pack(side="left",
+                                                                                                    padx=2)
         self.updated = ctk.CTkLabel(top, text="", text_color=MUTED)
         self.updated.pack(side="right", padx=10)
 

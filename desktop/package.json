@@ -1,0 +1,13 @@
+{
+  "name": "rose-desktop",
+  "version": "1.0.0",
+  "description": "ROSE desktop control center (Electron)",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "45.2.3"
+  }
+}

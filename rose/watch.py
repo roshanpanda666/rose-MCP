@@ -1,7 +1,9 @@
 """`rose watch`: the proactive part of ROSE. Runs as rose-watch.service.
 
-Every 30 s: due schedules (reminders, reports, scheduled Forge tasks) and new security events.
-Every 5 min: disk, RAM, battery. Every 10 min: GitHub (failing CI on your PRs, new review requests).
+Every 30 s: due schedules (reminders, reports, scheduled Forge tasks), new security events, the work-log
+sampler (rose.activity) and context triggers (rose.triggers). Every 5 min: disk, RAM, battery.
+Every 10 min: GitHub (CI failing / passing again on your PRs, new reviews and review comments on them,
+new review requests).
 Daily: cleanup of old screenshots/logs. Alerts go to the phone (ntfy) and the desktop.
 """
 
@@ -69,18 +71,24 @@ def _next_run(item: dict, after: datetime) -> datetime | None:
     return None
 
 
-def schedule_add(kind: Literal["remind", "report", "forge"], time_hhmm: str, text: str = "",
+def schedule_add(kind: Literal["remind", "report", "forge", "routine"], time_hhmm: str, text: str = "",
                  repeat: Literal["once", "daily", "weekdays", "weekly"] = "once", date: str = "",
                  weekday: str = "", confirm: bool = False) -> dict:
     """Schedule: remind (push text to phone), report (system+GitHub summary to bridge), forge (run text as a
-    Forge task; needs confirm=true). time_hhmm "18:00"; date YYYY-MM-DD; repeat once|daily|weekdays|weekly."""
+    Forge task; needs confirm=true), routine (text = routine name, e.g. "work"). time_hhmm "18:00";
+    date YYYY-MM-DD; repeat once|daily|weekdays|weekly."""
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", time_hhmm.strip()):
         raise ToolError("time_hhmm must be 24-hour HH:MM, e.g. 09:00 or 18:30.")
     if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         raise ToolError("date must be YYYY-MM-DD.")
     if repeat == "weekly" and weekday.lower()[:3] not in WEEKDAYS:
         raise ToolError("weekly needs weekday: mon..sun.")
-    if kind in ("remind", "forge") and not text.strip():
+    if kind == "routine":
+        from rose.tools import routines
+
+        if text.strip().lower().removesuffix(" mode").strip() not in routines.list_routines():
+            raise ToolError(f"No routine '{text}'. Routines: {', '.join(routines.list_routines())}.")
+    if kind in ("remind", "forge", "routine") and not text.strip():
         raise ToolError("Say what to remind about / what Forge should do.")
     if len(text) > 2000:
         raise ToolError("Text too long (max 2000).")
@@ -149,6 +157,9 @@ def _run_schedule(item: dict) -> None:
     try:
         if item["kind"] == "remind":
             push("⏰ Reminder", item["text"], priority="high", tags="alarm_clock")
+        elif item["kind"] == "routine":
+            from rose.tools import routines
+            push("🔁 Routine", routines.run_routine(item["text"]), tags="repeat")
         elif item["kind"] == "report":
             short, full = _report_text()
             post_as("ROSE", f"Scheduled report ({datetime.now():%a %d %b %H:%M})\n\n{full}", "all", email=False)
@@ -250,7 +261,92 @@ def _tick_system(state: dict) -> None:
              priority="high", tags="battery")
 
 
+def _gh_api(path: str):
+    """GET a GitHub REST path through the gh CLI (its own login); parsed JSON."""
+    from rose.common import run
+    out = run(["gh", "api", path], timeout=30)
+    return json.loads(out) if out.strip() else None
+
+
+def _gh_login(state: dict) -> str:
+    if not state.get("gh_login"):
+        try:
+            state["gh_login"] = (_gh_api("user") or {}).get("login", "")
+        except Exception:
+            return ""
+    return state.get("gh_login", "")
+
+
+REVIEW_RANK = {"CHANGES_REQUESTED": 3, "APPROVED": 2, "COMMENTED": 1}
+REVIEW_TITLE = {"CHANGES_REQUESTED": ("🔁 Changes requested", "high", "repeat"),
+                "APPROVED": ("✅ PR approved", "default", "white_check_mark"),
+                "COMMENTED": ("💬 New review", "default", "speech_balloon")}
+
+
+def _pr_activity(p: dict, me: str) -> dict:
+    """CI status, reviews and review comments by others on one authored PR (fetched in a worker thread)."""
+    from rose.tools import github
+    out: dict = {"pr": p}
+    try:
+        out["status"] = github.github_pr_status(p["repo"], p["number"])
+    except Exception:
+        out["status"] = None
+    base = f"repos/{p['repo']}/pulls/{p['number']}"
+    for kind, path in (("reviews", f"{base}/reviews?per_page=100"),
+                       ("comments", f"{base}/comments?per_page=100&sort=created&direction=desc")):
+        try:
+            items = _gh_api(path) or []
+            out[kind] = [i for i in items if isinstance(i, dict) and (i.get("user") or {}).get("login") != me
+                         and (i.get("user") or {}).get("type") != "Bot"]
+        except Exception:
+            out[kind] = None
+    return out
+
+
+def _review_push(a: dict, seen: dict) -> None:
+    """Push new reviews / review comments on one PR (one push per PR per check). Updates `seen` watermarks."""
+    p, k = a["pr"], f"{a['pr']['repo']}#{a['pr']['number']}"
+    first = k not in seen
+    if first and (a.get("reviews") is None or a.get("comments") is None):
+        return  # can't seed reliably this time; try again next check
+    w = seen.setdefault(k, {"r": 0, "c": 0})
+    new_r = [r for r in a.get("reviews") or [] if r.get("id", 0) > w["r"] and r.get("state") in REVIEW_RANK]
+    new_c = [c for c in a.get("comments") or [] if c.get("id", 0) > w["c"]]
+    if a.get("reviews") is not None:
+        w["r"] = max([w["r"]] + [r.get("id", 0) for r in a["reviews"]])
+    if a.get("comments") is not None:
+        w["c"] = max([w["c"]] + [c.get("id", 0) for c in a["comments"]])
+    if first:  # PR seen for the first time: seed silently
+        return
+    # a plain "commented" review with no body is just the wrapper of its inline comments
+    new_r = [r for r in new_r if r["state"] != "COMMENTED" or (r.get("body") or "").strip()]
+    if not new_r and not new_c:
+        return
+    if new_r:
+        top = max(new_r, key=lambda r: REVIEW_RANK[r["state"]])
+        title, prio, tags = REVIEW_TITLE[top["state"]]
+        who = ", ".join(sorted({(r.get("user") or {}).get("login", "?") for r in new_r}))
+        msg = f"#{p['number']} {p['title'][:80]} by {who}"
+        body = (top.get("body") or "").strip()
+        if body:
+            msg += f": \"{body[:150]}\""
+        url = top.get("html_url") or p.get("url")
+    else:
+        title, prio, tags = "💬 New review comment" + ("s" if len(new_c) > 1 else ""), "default", "speech_balloon"
+        c = min(new_c, key=lambda c: c.get("id", 0))
+        msg = f"#{p['number']} {p['title'][:80]}: {(c.get('user') or {}).get('login', '?')}: " \
+              f"\"{(c.get('body') or '').strip()[:150]}\""
+        url = c.get("html_url") or p.get("url")
+    if new_c and new_r:
+        msg += f" (+{len(new_c)} inline comment{'s' * (len(new_c) != 1)})"
+    elif len(new_c) > 1:
+        msg += f" (+{len(new_c) - 1} more)"
+    push(title, msg, url=url, priority=prio, tags=tags)
+
+
 def _tick_github(state: dict) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
     from rose.tools import github
     try:
         prs = github.github_my_prs()
@@ -264,20 +360,101 @@ def _tick_github(state: dict) -> None:
         seen.add(k)
     state["review_seen"] = sorted(seen)[-200:]
     failing = set(state.get("ci_failing", []))
+    # PRs whose CI was red and hasn't gone green yet (seeded from ci_failing so an upgrade doesn't spam)
+    red = set(state.get("ci_red", [k.split(":")[0] for k in failing]))
     now_failing = set()
-    for p in prs["authored"][:10]:
-        try:
-            st = github.github_pr_status(p["repo"], p["number"])
-        except Exception:
+    me = _gh_login(state)
+    authored = prs["authored"][:10]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        activity = list(pool.map(lambda p: _pr_activity(p, me), authored))
+    for a in activity:
+        p, st = a["pr"], a["status"]
+        pk = f"{p['repo']}#{p['number']}"
+        if st is None:
             continue
         if st["failing"]:
-            k = f"{p['repo']}#{p['number']}:{','.join(sorted(st['failing']))}"
+            k = f"{pk}:{','.join(sorted(st['failing']))}"
             now_failing.add(k)
+            red.add(pk)
             if k not in failing and state.get("github_started"):
                 push("❌ CI failing on your PR", f"#{p['number']} {p['title'][:80]}: {', '.join(st['failing'])[:120]}",
                      url=p.get("url"), priority="high", tags="x")
+        elif pk in red and not st["pending"] and st.get("checks_total", 1):
+            red.discard(pk)
+            if state.get("github_started"):
+                push("✅ CI passing again", f"#{p['number']} {p['title'][:80]}", url=p.get("url"),
+                     tags="white_check_mark")
+    open_keys = {f"{p['repo']}#{p['number']}" for p in authored}
     state["ci_failing"] = sorted(now_failing)
+    state["ci_red"] = sorted(red & open_keys)  # merged/closed PRs drop out silently
+    if me:
+        gh_seen = {k: v for k, v in state.get("pr_activity_seen", {}).items() if k in open_keys}
+        for a in activity:
+            _review_push(a, gh_seen)
+        state["pr_activity_seen"] = gh_seen
     state["github_started"] = True
+
+
+def _watching() -> list[str]:
+    cfg = load_config()
+    out = ["schedules", "security events", "disk", "RAM", "battery", "failing CI on your PRs",
+           "CI passing again", "reviews and review comments on your PRs", "new review requests", "daily cleanup"]
+    if cfg.get("activity_enabled", True):
+        out.append(f"work log (active window; summary at {cfg.get('activity_summary_time', '23:00')})")
+    try:
+        from rose import triggers
+        trig = triggers._triggers()
+    except Exception:
+        trig = []
+    if trig:
+        out.append("context triggers: " + ", ".join(f"{t['when']} -> {t['routine']}" for t in trig))
+    return out
+
+
+def _tick_phone() -> None:
+    """Every 10 s: drop a dead phone link, reconnect, and switch on the Tailscale fallback (phone.keepalive).
+    Does nothing until a phone has been connected once."""
+    import shutil
+    if not shutil.which("adb"):
+        return
+    from rose.tools import phone
+    before = phone._read_last().get("_watch_via")
+    st = phone.keepalive()
+    if st.get("never_connected"):
+        return
+    now = time.time()
+    if st["via"] != before:
+        phone._save_last(_watch_via=st["via"])
+        _log({"event": "phone_link", "via": st["via"], "remote_on": st.get("remote_on"),
+              "remote_error": st.get("remote_error", "")})
+        if st["via"] == "offline":
+            _PHONE["offline_since"], _PHONE["told"] = now, False
+        elif before == "offline" and _PHONE.get("told"):
+            from rose.common import notify_desktop
+            notify_desktop("Phone back", f"ROSE reconnected to the phone ({st['via']}).")
+    if st["via"] == "offline" and not _PHONE.get("told") and now - _PHONE.get("offline_since", now) > 120:
+        _PHONE["told"] = True
+        from rose.common import notify_desktop
+        notify_desktop("Phone unreachable", st.get("hint") or "ROSE keeps trying every 10 s.")
+
+
+_PHONE: dict = {}
+PHONE_EVERY = 10  # seconds between phone link checks (own thread, so slow watchers don't delay it)
+
+
+def _phone_loop() -> None:
+    while True:
+        if load_config().get("watch_enabled", True):
+            _safe("phone", _tick_phone)
+        time.sleep(PHONE_EVERY)
+
+
+def _safe(name: str, fn, *args) -> None:
+    """Run one watcher; a failure is logged and doesn't stop the others."""
+    try:
+        fn(*args)
+    except Exception as e:
+        _log({"event": "watch_error", "watcher": name, "error": f"{type(e).__name__}: {e}"})
 
 
 def watch_status() -> dict:
@@ -292,8 +469,7 @@ def watch_status() -> dict:
                 recent.append(json.loads(line).get("title"))
     return {"running_since": st.get("started"), "last_check": st.get("last_tick"),
             "phone_push": bool(settings()[1]),
-            "watching": ["schedules", "security events", "disk", "RAM", "battery", "failing CI on your PRs",
-                         "new review requests", "daily cleanup"],
+            "watching": _watching(),
             "recent_alerts": recent[-10:]}
 
 
@@ -305,6 +481,8 @@ def run() -> int:
     _save(STATE, state)
     last_sys = last_gh = 0.0
     print("rose watch: running", flush=True)
+    import threading
+    threading.Thread(target=_phone_loop, daemon=True, name="phone-link").start()
     while True:
         try:
             if not load_config().get("watch_enabled", True):
@@ -319,6 +497,9 @@ def run() -> int:
             if now - last_gh >= 600:
                 last_gh = now
                 _tick_github(state)
+            from rose import activity, triggers
+            _safe("activity", activity.tick, state)
+            _safe("triggers", triggers.tick, state)
             if now - state.get("last_cleanup", 0) >= 86400:
                 state["last_cleanup"] = now
                 maintenance.cleanup()

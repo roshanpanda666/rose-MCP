@@ -133,6 +133,30 @@ def cmd_tunnel(args) -> int:
     return tunnel.run()
 
 
+def cmd_face(args) -> int:
+    """Rose's animated face + message box on the desktop."""
+    if args.delay:
+        time.sleep(args.delay)
+    from rose.companion import run, set_wake
+    if args.wake:
+        return set_wake(args.wake == "on")
+    if args.talk:
+        from rose.companion import trigger_talk
+        return trigger_talk()
+    if args.wheel:
+        from rose.companion import trigger_wheel
+        return trigger_wheel()
+    if args.ui:
+        from rose.companion import _running_pid, _save_state, start_detached, stop
+        _save_state(face_ui=args.ui)
+        print(f"Rose's face: {'Electron' if args.ui == 'electron' else 'classic (Tk)'}.")
+        if _running_pid() is not None:
+            stop()
+            start_detached()
+        return 0
+    return run("stop" if args.stop else "restart" if args.restart else "show")
+
+
 def cmd_gui(args) -> int:
     if args.delay:
         time.sleep(args.delay)  # at login: let the panel/session settle first
@@ -379,6 +403,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="what's running").set_defaults(fn=cmd_status)
     sub.add_parser("reload", help="restart the HTTP server with new code").set_defaults(fn=cmd_reload)
     sub.add_parser("config", help="show settings").set_defaults(fn=cmd_config)
+    p = sub.add_parser("face", help="Rose's animated face and message box on the desktop")
+    p.add_argument("--delay", type=float, default=0, help="seconds to wait before opening")
+    p.add_argument("--stop", action="store_true", help="close Rose's face")
+    p.add_argument("--restart", action="store_true", help="reload Rose's face (new code, fresh state)")
+    p.add_argument("--wake", choices=["on", "off"], help='turn the offline "Hey Rose" wake word on/off')
+    p.add_argument("--talk", action="store_true", help="show Rose, open her chat and push-to-talk (bind to a desktop shortcut)")
+    p.add_argument("--wheel", action="store_true", help="open/close the menu wheel (bind to a desktop shortcut, e.g. Super+C)")
+    p.add_argument("--ui", choices=["electron", "tk"], help="which face to use: electron (default) or the classic tk one")
+    p.set_defaults(fn=cmd_face)
     p = sub.add_parser("gui", help="open the ROSE dashboard")
     p.add_argument("--delay", type=float, default=0, help="seconds to wait before opening")
     p.set_defaults(fn=cmd_gui)
@@ -424,6 +457,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("auth", help="set-passphrase | new-token | label | list | revoke")
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_auth)
+    # Claude Code reports back (rose/claude_events.py): the hook command and its settings.json installer
+    p = sub.add_parser("claude-hook", help=argparse.SUPPRESS)
+    p.add_argument("event", nargs="?", default="")
+    p.set_defaults(fn=lambda a: __import__("importlib").import_module("rose.claude_events").hook_main(a.event))
+    p = sub.add_parser("claude-hooks", help="Claude Code hooks -> ROSE (phone push, state): install | uninstall | status")
+    p.add_argument("action", choices=["install", "uninstall", "status"], nargs="?", default="status")
+    p.add_argument("--settings", default="", help="settings.json path (default ~/.claude/settings.json)")
+    p.set_defaults(fn=lambda a: __import__("importlib").import_module("rose.claude_events").hooks_cli(a.action, a.settings))
     args = ap.parse_args(argv)
     return args.fn(args) or 0
 
