@@ -62,6 +62,25 @@ def _windows_snapshot() -> list[dict]:
 
 
 def _before(tool: str, kw: dict) -> dict | None:
+    if tool == "copy_file":
+        from rose.tools import files
+
+        src, dst = files.copy_target(kw["source"], kw["destination"])
+        if dst.is_file():
+            UNDO_DIR.mkdir(parents=True, exist_ok=True)
+            backup = UNDO_DIR / f"{uuid.uuid4().hex[:10]}.bak"
+            shutil.copy2(dst, backup)
+            return {"kind": "restore_file", "path": str(dst), "backup": str(backup)}
+        if dst.exists():
+            return None
+        return {"kind": "remove_new_tree" if src.is_dir() else "remove_new_file", "path": str(dst)}
+    if tool == "unzip_file":
+        from rose.tools import files
+
+        _, dst = files.unzip_target(kw["archive"], kw.get("destination", ""))
+        return None if dst.exists() else {"kind": "remove_new_tree", "path": str(dst)}
+    if tool == "edit_file":
+        tool = "write_file"
     if tool == "write_file":
         from rose.tools import files
 
@@ -111,6 +130,26 @@ def _after(tool: str, kw: dict, result, snap: dict | None) -> tuple[str, dict] |
     if tool == "move_file" and isinstance(result, str) and " -> " in result:
         src, dst = result.removeprefix("Moved ").split(" -> ", 1)
         return f"moved {Path(src).name} to {dst}", {"kind": "move_back", "from": dst, "to": src}
+    if tool == "trash_file" and isinstance(result, str) and "(as " in result:
+        path = result.removeprefix("Moved ").split(" to the Trash", 1)[0]
+        name = result.rsplit("(as ", 1)[1].rstrip(")")
+        return f"trashed {Path(path).name}", {"kind": "untrash", "path": path, "name": name}
+    if tool == "zip_files" and isinstance(result, str) and result.startswith("Created "):
+        out = result.removeprefix("Created ").rsplit(" (", 1)[0]
+        return f"zipped {Path(out).name}", {"kind": "remove_new_file", "path": out}
+    if tool == "new_project" and isinstance(result, dict) and result.get("path"):
+        return f"new project {result['project']}", {"kind": "remove_new_project", "path": result["path"]}
+    if tool == "git_branch" and isinstance(result, dict) and result.get("previous") \
+            and result.get("branch") != result["previous"] and result["previous"] != "(detached)":
+        u = {"kind": "git_switch", "repo": result["path"], "branch": result["previous"]}
+        if kw.get("action") == "create":
+            u["delete"] = result["branch"]
+        return f"switched {result['project']} to {result['branch']}", u
+    if tool == "sort_downloads" and isinstance(result, dict) and result.get("moves"):
+        return f"sorted {result['moved']} downloads", {"kind": "moves", "moves": result["moves"]}
+    if tool in ("copy_file", "unzip_file", "edit_file") and snap:
+        verb = {"copy_file": "copied to", "unzip_file": "unzipped to", "edit_file": "edited"}[tool]
+        return f"{verb} {Path(snap['path']).name}", snap
     if tool == "create_folder" and snap and isinstance(result, str) and result.startswith("Created folder "):
         return f"created folder {Path(snap['path']).name}", snap
     if snap is None:
@@ -182,7 +221,7 @@ def routine_after(name: str, snap: dict) -> None:
 
 # ---------------- reversing ----------------
 
-DESTRUCTIVE = {"restore_file", "remove_new_file"}
+DESTRUCTIVE = {"restore_file", "remove_new_file", "remove_new_tree", "remove_new_project"}
 
 
 def _needs_confirm(u: dict) -> bool:
@@ -212,6 +251,63 @@ def _reverse(u: dict) -> str:
         if p.exists():
             p.unlink()
         return f"removed {p.name} (it didn't exist before)"
+    if kind == "remove_new_tree":
+        p = Path(u["path"])
+        if p.is_dir():
+            shutil.rmtree(p)
+        elif p.exists():
+            p.unlink()
+        return f"removed {p.name} (it didn't exist before)"
+    if kind == "remove_new_project":
+        import subprocess
+
+        p = Path(u["path"])
+        if not p.is_dir():
+            return f"{p.name} is already gone"
+        if subprocess.run(["git", "-C", str(p), "rev-parse", "--verify", "-q", "HEAD"],
+                          capture_output=True).returncode == 0:
+            raise ToolError(f"{p.name} has commits now; ROSE won't delete it.")
+        extra = [f.name for f in p.iterdir() if f.name not in (".git", "README.md", ".gitignore")]
+        if extra:
+            raise ToolError(f"{p.name} has new files ({', '.join(extra[:5])}); ROSE won't delete it.")
+        shutil.rmtree(p)
+        return f"removed the new project {p.name}"
+    if kind == "untrash":
+        trash = Path.home() / ".local" / "share" / "Trash"
+        src, dst, info = trash / "files" / u["name"], Path(u["path"]), trash / "info" / f"{u['name']}.trashinfo"
+        if not src.exists() and not src.is_symlink():
+            raise ToolError(f"{dst.name} isn't in the Trash any more.")
+        if dst.exists():
+            raise ToolError(f"Can't restore: {dst} exists again.")
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        info.unlink(missing_ok=True)
+        return f"restored {dst.name} from the Trash"
+    if kind == "moves":
+        back = 0
+        for frm, to in reversed(u["moves"]):
+            if Path(to).exists() and not Path(frm).exists():
+                shutil.move(to, frm)
+                back += 1
+                try:
+                    Path(to).parent.rmdir()  # only if it's now empty
+                except OSError:
+                    pass
+        return f"moved {back} file(s) back"
+    if kind == "git_switch":
+        import subprocess
+
+        def g(*a):
+            return subprocess.run(["git", "-C", u["repo"], *a], capture_output=True, text=True)
+
+        r = g("switch", u["branch"])
+        if r.returncode != 0:
+            raise ToolError(f"Couldn't switch back to {u['branch']}: {r.stderr.strip()[:200]}")
+        note = ""
+        if u.get("delete"):
+            note = " and deleted " + u["delete"] if g("branch", "-d", u["delete"]).returncode == 0 \
+                else f" ({u['delete']} kept: it has new commits)"
+        return f"back on {u['branch']}{note}"
     if kind == "remove_new_dir":
         p = Path(u["path"])
         if p.is_dir():

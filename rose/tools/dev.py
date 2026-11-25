@@ -22,6 +22,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from rose.common import ToolError, launch_detached
 from rose.config import ROSE_HOME
@@ -445,6 +446,81 @@ def _notify_exit(log: Path) -> int:
         if t is not threading.current_thread() and t.daemon:
             t.join(15)
     return 0
+
+
+# ---------- new project / branches ----------
+
+GITIGNORE = {
+    "plain": ".DS_Store\n*.log\n.env\n.env.*\n",
+    "python": ".DS_Store\n*.log\n.env\n.env.*\n__pycache__/\n*.py[cod]\n.venv/\nvenv/\n.pytest_cache/\n"
+              ".ruff_cache/\n.mypy_cache/\ndist/\nbuild/\n*.egg-info/\n",
+    "node": ".DS_Store\n*.log\n.env\n.env.*\nnode_modules/\ndist/\nbuild/\n.next/\ncoverage/\n",
+}
+NEW_PROJECT_FILES = {"README.md", ".gitignore"}
+
+
+def new_project(name: str, group: Literal["personal", "work"] = "personal",
+                kind: Literal["plain", "python", "node"] = "plain", open_in_code: bool = True) -> dict:
+    """Start a new project: folder in ~/0x/projects (group=work: ~/0x/work), `git init`, README.md and a
+    .gitignore for `kind`, then open it in VS Code. Refuses if the folder exists."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
+    if not slug:
+        raise ToolError("Give the project a name.")
+    parent = projects._root() / ("work" if group == "work" else "projects")
+    path = parent / slug
+    if path.exists():
+        raise ToolError(f"{path} already exists; open it with open_project('{slug}').")
+    path.mkdir(parents=True)
+    try:
+        _git(path, "init", "-q", "-b", "main")
+        (path / "README.md").write_text(f"# {name.strip()}\n")
+        (path / ".gitignore").write_text(GITIGNORE.get(kind, GITIGNORE["plain"]))
+    except Exception:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+    if open_in_code:
+        try:
+            projects.open_in_code(path, path / "README.md")
+        except ToolError:
+            pass
+    return {"project": slug, "path": str(path), "group": group, "kind": kind,
+            "files": sorted(NEW_PROJECT_FILES), "opened": open_in_code}
+
+
+def git_branch(project: str = "", action: Literal["list", "create", "switch"] = "list", name: str = "") -> dict:
+    """Branches of a ~/0x project ('' = recent). list: local branches (current marked). create: new branch from
+    HEAD and switch to it. switch: go to an existing branch; refuses with uncommitted changes. Never pushes."""
+    repo = _repo(project)
+    current = _git(repo, "branch", "--show-current").stdout.strip() or "(detached)"
+    if action == "list":
+        rows = _git(repo, "for-each-ref", "--sort=-committerdate", "refs/heads",
+                    "--format=%(refname:short)\t%(committerdate:format:%Y-%m-%d %H:%M)\t%(subject)").stdout
+        branches = []
+        for ln in rows.splitlines():
+            b, _, rest = ln.partition("\t")
+            when, _, subject = rest.partition("\t")
+            branches.append({"branch": b, "current": b == current, "last_commit": when, "subject": subject[:80]})
+        return {"project": repo.name, "current": current, "branches": branches[:MAX_FILES]}
+    name = name.strip()
+    if not name:
+        raise ToolError(f"Give the branch name to {action}.")
+    if _git(repo, "check-ref-format", "--branch", name, check=False).returncode != 0:
+        raise ToolError(f"'{name}' isn't a valid branch name.")
+    exists = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}", check=False).returncode == 0
+    if action == "create":
+        if exists:
+            raise ToolError(f"Branch {name} already exists; use action='switch'.")
+        _git(repo, "switch", "-c", name)
+    else:
+        if not exists:
+            raise ToolError(f"No branch {name} in {repo.name}; use action='create' or git_branch(action='list').")
+        if name == current:
+            return {"project": repo.name, "branch": name, "previous": current, "note": "Already on it."}
+        dirty = [ln for ln in _git(repo, "status", "--porcelain").stdout.splitlines() if not ln.startswith("??")]
+        if dirty:
+            raise ToolError(f"{repo.name} has {len(dirty)} uncommitted change(s); commit or stash them first.")
+        _git(repo, "switch", name)
+    return {"project": repo.name, "path": str(repo), "branch": name, "previous": current}
 
 
 def main(argv: list[str]) -> int:

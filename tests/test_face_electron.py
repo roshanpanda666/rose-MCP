@@ -43,6 +43,12 @@ class _Proc:
     def __init__(self):
         self.stdin = io.BytesIO()
 
+    def poll(self):
+        return 0  # already exited, so quit()'s force-kill thread does nothing
+
+    def terminate(self):
+        pass
+
     def sent(self) -> list[dict]:
         return [json.loads(x) for x in self.stdin.getvalue().decode().splitlines()]
 

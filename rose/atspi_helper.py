@@ -31,6 +31,20 @@ TEXTUAL = {"entry", "text", "password text", "spin button", "combo box", "termin
            "paragraph", "editbar"}
 SECRET = {"password text"}  # never return what's in these
 
+# Never query the compositor's own accessibility tree. Walking gnome-shell's stage (panel, dash, menus)
+# makes its atk-bridge hold references to St actors; when the shell later disposes those actors, the
+# bridge's lease expiry unrefs freed memory and gnome-shell segfaults (libatk-bridge -> g_object_unref).
+# On X11 that ends the whole session ("Oh no! Something has gone wrong", log in again).
+SKIP_APPS = {"gnome-shell", "mutter-x11-frames"}
+
+
+def _apps(desk):
+    """Accessible applications on the desktop, minus the compositor (see SKIP_APPS)."""
+    for i in range(desk.get_child_count()):
+        app = desk.get_child_at_index(i)
+        if app is not None and _name(app).lower() not in SKIP_APPS:
+            yield app
+
 
 def _role(a):
     try:
@@ -100,10 +114,7 @@ def find_window(query):
     desk = Atspi.get_desktop(0)
     best = None
     empty_match = None  # an app that matches but exposes no window (yet)
-    for i in range(desk.get_child_count()):
-        app = desk.get_child_at_index(i)
-        if app is None:
-            continue
+    for app in _apps(desk):
         appname = _name(app).lower()
         if q and (q == appname or q in appname) and app.get_child_count() == 0:
             empty_match = _name(app)
@@ -122,8 +133,7 @@ def find_window(query):
         raise LookupError(f"NOT_READY: '{empty_match}' is running but its window isn't in the accessibility tree yet.")
     if best is None:
         raise LookupError(f"No accessible window matches '{query}'. Apps: " +
-                          ", ".join(sorted({_name(desk.get_child_at_index(i)) for i in range(desk.get_child_count())
-                                            if desk.get_child_at_index(i)} - {""})))
+                          ", ".join(sorted({_name(a) for a in _apps(desk)} - {""})))
     return best
 
 
@@ -287,10 +297,7 @@ def do_focus(req):
 def _active_windows(query=""):
     q = (query or "").lower()
     desk = Atspi.get_desktop(0)
-    for i in range(desk.get_child_count()):
-        app = desk.get_child_at_index(i)
-        if app is None:
-            continue
+    for app in _apps(desk):
         for j in range(app.get_child_count()):
             w = app.get_child_at_index(j)
             if w is None:
@@ -333,9 +340,8 @@ def do_boxes(req):
     if req.get("all"):  # every window that is on screen (not minimized), e.g. a player on the other monitor
         desk = Atspi.get_desktop(0)
         wins = []
-        for i in range(desk.get_child_count()):
-            app = desk.get_child_at_index(i)
-            for j in range(app.get_child_count() if app else 0):
+        for app in _apps(desk):
+            for j in range(app.get_child_count()):
                 w = app.get_child_at_index(j)
                 if w is not None and _states(w).get("showing"):
                     wins.append((app, w))

@@ -473,6 +473,14 @@ def watch_status() -> dict:
             "recent_alerts": recent[-10:]}
 
 
+def _sort_downloads() -> None:
+    from rose.tools import organize, undo
+    days = float(load_config().get("downloads_autosort_days", 7))
+    res = undo.undoable(organize.sort_downloads)(dry_run=False, min_age_days=days)
+    if res.get("moved"):
+        _log({"event": "downloads_sorted", "moved": res["moved"], "by_folder": res.get("by_folder")})
+
+
 def run() -> int:
     """Main loop for rose-watch.service."""
     from rose import maintenance
@@ -483,6 +491,8 @@ def run() -> int:
     print("rose watch: running", flush=True)
     import threading
     threading.Thread(target=_phone_loop, daemon=True, name="phone-link").start()
+    from rose.tools import clipboard
+    threading.Thread(target=clipboard.history_loop, daemon=True, name="clipboard-history").start()
     while True:
         try:
             if not load_config().get("watch_enabled", True):
@@ -503,6 +513,9 @@ def run() -> int:
             if now - state.get("last_cleanup", 0) >= 86400:
                 state["last_cleanup"] = now
                 maintenance.cleanup()
+            if load_config().get("downloads_autosort", False) and now - state.get("last_downloads_sort", 0) >= 86400:
+                state["last_downloads_sort"] = now
+                _safe("downloads", _sort_downloads)
             state["last_tick"] = datetime.now().isoformat(timespec="seconds")
             _save(STATE, state)
         except Exception as e:  # never die; log and keep going

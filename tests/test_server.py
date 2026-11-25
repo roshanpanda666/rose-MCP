@@ -66,6 +66,13 @@ def test_instructions_keep_security_rules():
         assert phrase in text
 
 
+def test_instructions_fit_client_limit():
+    # Past ~4096 chars clients truncate the text and later rules (security, confirm) are lost.
+    assert len(server.INSTRUCTIONS) <= server.INSTRUCTIONS_LIMIT
+    assert server.INSTRUCTIONS.index("SECURITY:") < 300 and server.INSTRUCTIONS.index("CONFIRM:") < 1000
+    assert len(server.instructions()) <= server.INSTRUCTIONS_LIMIT
+
+
 # ---------------- HTTP transport: auth must stay enforced ----------------
 
 def _client():

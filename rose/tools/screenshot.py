@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from rose.common import ToolError, display_env, run, session_type
 from rose.config import SCREENSHOT_DIR
@@ -329,3 +329,133 @@ def screen_frame(monitor: int | None = None, max_side: int = 1280, quality: int 
     import json
 
     return [json.dumps(meta), Image(data=buf.getvalue(), format="jpeg")]
+
+
+# ---------------- live screen video (phone app) ----------------
+# One ffmpeg (transient user service rose-screen-stream) grabs the X11 screen and serves multipart MJPEG to
+# ONE client on 127.0.0.1 only; the phone app's backend relays it. Unchanged frames are dropped (mpdecimate),
+# with one frame at least every ~2 s so the connection stays alive. It ends when the viewer disconnects, when
+# nobody connects within SCREEN_ACCEPT_MS, on screen_live_stop, or after SCREEN_MAX_SECONDS. Nothing is saved.
+
+SCREEN_UNIT = "rose-screen-stream"
+SCREEN_PORT = 8798
+SCREEN_PATH = "/screen.mjpg"
+SCREEN_BOUNDARY = "ffmpeg"
+SCREEN_ACCEPT_MS = 20000
+SCREEN_MAX_SECONDS = 3600
+# quality -> (longest side, fps, JPEG q, pixel format). 4:4:4 keeps text and thin UI lines crisp.
+SCREEN_QUALITIES = {
+    "low": (1280, 8, 6, "yuvj420p"),
+    "medium": (1600, 10, 5, "yuvj444p"),
+    "high": (1920, 15, 4, "yuvj444p"),
+}
+
+
+def _screen_stream_active() -> bool:
+    from rose.common import systemctl_user
+
+    return systemctl_user("is-active", SCREEN_UNIT) == "active"
+
+
+def _stop_screen_stream() -> None:
+    from rose.common import systemctl_user
+
+    systemctl_user("stop", SCREEN_UNIT)
+    for _ in range(20):
+        if not _screen_stream_active():
+            return
+        time.sleep(0.1)
+
+
+def screen_live_stream(monitor: int | None = None, quality: str = "") -> dict:
+    """Start smooth live screen video (MJPEG on 127.0.0.1, ONE viewer) for the phone app to relay; ends when
+    the viewer leaves. monitor=N, -1 for the whole desktop, none = the active window's. quality: low/medium/high."""
+    from rose.config import load_config
+    from rose.tools.recorder import _listening
+
+    if session_type() != "x11" or not shutil.which("ffmpeg"):
+        raise ToolError("Live screen video needs X11 and ffmpeg; use screen_frame.")
+    q = (quality or load_config().get("screen_live_quality") or "medium").lower()
+    if q not in SCREEN_QUALITIES:
+        raise ToolError(f"quality must be one of {', '.join(SCREEN_QUALITIES)}")
+    max_side, fps, jq, pix = SCREEN_QUALITIES[q]
+    if monitor is not None and monitor < 0:
+        rect, label = None, "full desktop"
+    else:
+        rect, label = resolve_area("auto" if monitor is None else "monitor", monitor)
+    if rect is None:
+        mons = monitors()
+        if not mons:
+            raise ToolError("No monitors found.")
+        rect = (0, 0, max(m["x"] + m["width"] for m in mons), max(m["y"] + m["height"] for m in mons))
+    x, y, w, h = (int(v) for v in rect)
+    w, h = w - w % 2, h - h % 2
+    k = min(1.0, max_side / max(w, h))
+    out_w, out_h = max(2, int(w * k) // 2 * 2), max(2, int(h * k) // 2 * 2)
+    if _screen_stream_active():
+        _stop_screen_stream()
+    env = display_env()
+    setenv = [f"--setenv={n}={env[n]}" for n in ("DISPLAY", "XAUTHORITY") if env.get(n)]
+    vf = f"mpdecimate=max={fps * 2}," + (f"scale={out_w}:{out_h}:flags=lanczos," if (out_w, out_h) != (w, h) else "")
+    run(["systemd-run", "--user", "--collect", f"--unit={SCREEN_UNIT}", "--property=KillSignal=SIGINT",
+         f"--property=RuntimeMaxSec={SCREEN_MAX_SECONDS}", *setenv,
+         "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "x11grab", "-framerate", str(fps), "-draw_mouse", "1",
+         "-video_size", f"{w}x{h}", "-i", f"{env.get('DISPLAY', ':0')}+{x},{y}",
+         "-vf", vf + f"format={pix}", "-fps_mode", "vfr", "-q:v", str(jq),
+         "-f", "mpjpeg", "-boundary_tag", SCREEN_BOUNDARY, "-listen_timeout", str(SCREEN_ACCEPT_MS),
+         "-listen", "1", f"http://127.0.0.1:{SCREEN_PORT}{SCREEN_PATH}"])
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline and not _listening(SCREEN_PORT):
+        if not _screen_stream_active():
+            break
+        time.sleep(0.05)
+    if not _listening(SCREEN_PORT):
+        _stop_screen_stream()
+        raise ToolError("The live screen video didn't start; use screen_frame.")
+    return {"stream": f"http://127.0.0.1:{SCREEN_PORT}{SCREEN_PATH}",
+            "content_type": f"multipart/x-mixed-replace;boundary={SCREEN_BOUNDARY}",
+            "offset_x": x, "offset_y": y, "scale": round(w / out_w, 5), "width": out_w, "height": out_h,
+            "screen_width": w, "screen_height": h, "area": label, "quality": q, "fps": fps}
+
+
+def screen_live_stop() -> str:
+    """Stop the live screen video."""
+    if not _screen_stream_active():
+        return "The live screen video wasn't running."
+    _stop_screen_stream()
+    return "Live screen video stopped."
+
+
+def screen_ocr(area: Literal["active_window", "monitor", "desktop", "window"] = "active_window", window: str = "",
+               monitor: int | None = None, copy: bool = True) -> str:
+    """Read the text in part of the screen with OCR and (copy=true) put it on the clipboard. area: the active
+    window, a monitor (monitor=<index>), the whole desktop, or window=<title words> for a specific window."""
+    from rose.common import require
+
+    require("tesseract", "sudo apt install tesseract-ocr")
+    wins = _windows_or_none()
+    if area == "window" or window:
+        q = window.strip().lower()
+        if not q:
+            raise ToolError("area='window' needs window=<part of its title>.")
+        hits = [w for w in wins or [] if q in (w.get("title") or "").lower() or q in (w.get("app") or "").lower()]
+        if not hits:
+            raise ToolError(f"No window like '{window}'.")
+        w = next((h for h in hits if h.get("active")), hits[0])
+        rect, label = (w["x"], w["y"], w["width"], w["height"]), f"window '{w['title'][:60]}'"
+    else:
+        rect, label = resolve_area(area, monitor, windows=wins)
+    img = _open(take_screenshot())
+    if rect is not None:
+        img = img.crop(_clamp(img, rect))
+    raw = _ocr(img, 50_000)
+    text = raw.split("\n", 1)[1].strip() if "\n" in raw else ""
+    if not text or text == "(none detected)":
+        return f"No text found in the {label}."
+    note = ""
+    if copy:
+        from rose.tools.clipboard import clipboard_write
+
+        clipboard_write(text)
+        note = " (copied to the clipboard)"
+    return f"Text in the {label}{note}:\n{text}"

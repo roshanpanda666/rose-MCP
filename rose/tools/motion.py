@@ -1,8 +1,8 @@
 """Motion watch: the webcam watches the room and logs every frame that changes.
 
-One ffmpeg (transient user service rose-motion) reads the camera at 2 fps and:
-  - keeps overwriting the webcam live-view frame (so the live view still works while watching), and
-  - runs ffmpeg's scene-change score on each frame; frames above the threshold overwrite motion.jpg and
+One ffmpeg (transient user service rose-motion) reads the camera (720p when it has MJPEG) and:
+  - keeps overwriting the webcam live-view frame at 6 fps (so the live view still works while watching), and
+  - runs ffmpeg's scene-change score at 2 fps; frames above the threshold overwrite motion.jpg and
     append a line to events.log.
 Clients poll motion_events with the byte offset they got last time and receive only what's new.
 Person detection runs in the client (the phone app), on the motion frames.
@@ -15,6 +15,7 @@ started the watch (or local Claude Code). Nothing is kept after motion_watch_sto
 from __future__ import annotations
 
 import json
+import shlex
 import time
 from datetime import datetime
 from typing import Literal
@@ -70,6 +71,8 @@ def motion_watch_start(sensitivity: Literal["low", "medium", "high"] = "medium",
         raise ToolError(f"{device} is not a capture device. Cameras: {cams}")
     if webcam._live_active():  # one camera user at a time: the watch takes over the live view's frame file
         systemctl_user("stop", webcam.LIVE_UNIT)
+    if webcam._stream_active():  # the phone's live video ends; its viewer falls back to frames from the watch
+        webcam._stop_unit(webcam.STREAM_UNIT)
     MOTION_DIR.mkdir(parents=True, exist_ok=True)
     MOTION_DIR.chmod(0o700)
     webcam.WEBCAM_DIR.mkdir(parents=True, exist_ok=True)
@@ -78,15 +81,25 @@ def motion_watch_start(sensitivity: Literal["low", "medium", "high"] = "medium",
         f.unlink(missing_ok=True)
     LOG.touch(mode=0o600)
     thr = THRESHOLDS[sensitivity]
-    graph = (f"[0:v]fps=2,split=2[a][b];[b]select='gt(scene\\,{thr})*gte(t\\,{WARMUP_S})',"
-             f"metadata=print:file={LOG}:direct=1[m]")
+    # Detection stays at 2 fps (the thresholds are tuned for it). With an MJPEG camera the input is 720p: alert
+    # snapshots are sharp and the live view (webcam_live_frame while the watch runs) gets 6 fps at 960 px.
+    hd = webcam._supports_mjpeg(device)
+    size = "1280x720" if hd else "640x480"
+    live = "fps=6,scale=960:-2" if hd else "fps=2"
+    # Two ffmpegs: the first reads the camera, writes the live-view frame and pipes 2 fps frames (NUT keeps
+    # their timestamps) to the second, which scores scene changes and writes motion frames + events.log. In one
+    # ffmpeg, an output that gets no frames (no motion) stalls every other output: the live view froze.
+    reader = ["ffmpeg", "-hide_banner", "-loglevel", "error", *webcam._input_args(device, size, low_delay=False),
+              "-filter_complex", f"[0:v]split=2[l][d];[l]{live}[a];[d]fps=2[m]",
+              "-map", "[a]", "-q:v", "5", "-update", "1", "-atomic_writing", "1", "-y", str(webcam.LIVE_FILE),
+              "-map", "[m]", "-c:v", "mjpeg", "-q:v", "2", "-f", "nut", "-"]
+    detector = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "nut", "-i", "-",
+                "-vf", f"select='gt(scene\\,{thr})*gte(t\\,{WARMUP_S})',metadata=print:file={LOG}:direct=1",
+                "-q:v", "3", "-fps_mode", "vfr", "-update", "1", "-atomic_writing", "1", "-y", str(FRAME)]
     until = time.time() + hours * 3600
     run(["systemd-run", "--user", "--collect", f"--unit={UNIT}", "--property=KillSignal=SIGINT",
          f"--property=RuntimeMaxSec={int(hours * 3600)}",
-         "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-video_size", "640x480", "-i", device,
-         "-filter_complex", graph,
-         "-map", "[a]", "-q:v", "6", "-update", "1", "-atomic_writing", "1", "-y", str(webcam.LIVE_FILE),
-         "-map", "[m]", "-q:v", "4", "-fps_mode", "vfr", "-update", "1", "-atomic_writing", "1", "-y", str(FRAME)])
+         "sh", "-c", f"{shlex.join(reader)} | {shlex.join(detector)}"])
     STATE.write_text(json.dumps({"owner": _caller(), "sensitivity": sensitivity, "device": device,
                                  "started": time.time(), "until": until}))
     STATE.chmod(0o600)

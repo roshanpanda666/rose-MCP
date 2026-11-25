@@ -179,3 +179,26 @@ def memory_forget(memory_id: int, confirm: bool = False) -> str:
                             "To delete it, call again with confirm=true.")
         con.execute("DELETE FROM memories WHERE id = ?", (int(memory_id),))
     return f"Forgot memory {memory_id}."
+
+
+CORE_TAG = "core"
+KIND_ORDER = {"fact": 0, "preference": 1, "project": 2, "task": 3}
+
+
+def core_context(max_chars: int = 3500) -> str:
+    """The memories tagged 'core' (who the user is, where projects live, how they work) as short bullet lines,
+    for clients to put in every chat. '' when there are none or the database can't be read."""
+    try:
+        with _db() as (con, _):
+            rows = con.execute("SELECT * FROM memories WHERE ',' || tags || ',' LIKE ? ORDER BY updated",
+                               (f"%,{CORE_TAG},%",)).fetchall()
+    except Exception:
+        return ""
+    lines, used = [], 0
+    for r in sorted(rows, key=lambda r: KIND_ORDER.get(r["kind"], 9)):
+        line = "- " + r["text"]
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)

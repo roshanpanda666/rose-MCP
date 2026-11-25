@@ -80,3 +80,14 @@ def test_like_fallback(monkeypatch):
     assert memory.memory_search("standup weekday")[0]["text"].startswith("Standup")
     assert memory.memory_search("health")[0]["text"].startswith("Gym")
     assert memory.memory_search("100%_") == []  # LIKE wildcards are escaped
+
+
+def test_core_context_only_core_tagged(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory, "DB_PATH", tmp_path / "memory.db")
+    memory.memory_save("Prefers 24-hour times", tags="time, core", kind="preference")
+    memory.memory_save("All code lives in ~/0x", tags="core", kind="fact")
+    memory.memory_save("Likes masala tea", tags="drink", kind="preference")
+    assert memory.core_context().splitlines() == ["- All code lives in ~/0x", "- Prefers 24-hour times"]
+    from rose import server
+    monkeypatch.setattr(memory, "DB_PATH", tmp_path / "memory.db")
+    assert "ABOUT THE USER" in server.instructions() and "~/0x" in server.instructions()

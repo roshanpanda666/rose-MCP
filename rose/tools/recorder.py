@@ -175,8 +175,23 @@ def _ec_load(mic: str) -> str | None:
     return mod if mod.isdigit() else None
 
 
-def mic_live_start(source: str = "", echo_cancel: bool = True) -> dict:
-    """Start live listening to a laptop mic (name from mic_sources; empty = default). Laptop is notified."""
+LISTEN_FILES = {"webm": "live.webm", "pcm": "live.ulaw"}
+
+
+def _listen_args(capture: str, format: str) -> list[str]:
+    """ffmpeg input + output arguments for live listening in `format`."""
+    url = f"http://127.0.0.1:{LISTEN_PORT}/{LISTEN_FILES[format]}"
+    if format == "pcm":  # tiny PulseAudio fragments (~13 ms) and no muxer buffering: lowest delay
+        return ["-fragment_size", "1280", "-f", "pulse", "-i", capture, "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_mulaw", "-f", "mulaw", "-flush_packets", "1", "-listen", "1", url]
+    return ["-f", "pulse", "-i", capture, "-ac", "1", "-ar", "48000",
+            "-c:a", "libopus", "-b:a", "48k", "-application", "voip", "-f", "webm", "-live", "1",
+            "-cluster_time_limit", "500", "-listen", "1", url]
+
+
+def mic_live_start(source: str = "", echo_cancel: bool = True, format: str = "webm") -> dict:
+    """Start live listening to a laptop mic (name from mic_sources; empty = default). Laptop is notified.
+    format: webm (Opus, small) or pcm (8-bit mu-law 16 kHz mono, 128 kbit/s, lowest delay)."""
     if not shutil.which("ffmpeg"):
         raise ToolError("ffmpeg is not installed (sudo apt install ffmpeg).")
     mics = _sources()
@@ -184,6 +199,8 @@ def mic_live_start(source: str = "", echo_cancel: bool = True) -> dict:
         next((m for m in mics if m["default"]), mics[0] if mics else None)
     if mic is None:
         raise ToolError(f"No microphone named {source!r}. Use mic_sources.")
+    if format not in ("webm", "pcm"):
+        raise ToolError("format must be webm or pcm")
     if systemctl_user("is-active", LISTEN_UNIT) == "active":
         run(["systemctl", "--user", "stop", LISTEN_UNIT], timeout=10)
     capture, cleanup = mic["name"], []
@@ -193,9 +210,7 @@ def mic_live_start(source: str = "", echo_cancel: bool = True) -> dict:
         cleanup = [f"--property=ExecStopPost={shutil.which('pactl')} unload-module {mod}"]
     run(["systemd-run", "--user", "--collect", f"--unit={LISTEN_UNIT}", f"--property=RuntimeMaxSec={LISTEN_MAX_SECONDS}",
          *cleanup,
-         "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", capture, "-ac", "1", "-ar", "48000",
-         "-c:a", "libopus", "-b:a", "48k", "-application", "voip", "-f", "webm", "-live", "1",
-         "-cluster_time_limit", "500", "-listen", "1", f"http://127.0.0.1:{LISTEN_PORT}/live.webm"])
+         "ffmpeg", "-hide_banner", "-loglevel", "error", *_listen_args(capture, format)])
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:  # wait until ffmpeg is listening (never connect: it serves one client)
         if _listening(LISTEN_PORT):
@@ -206,7 +221,7 @@ def mic_live_start(source: str = "", echo_cancel: bool = True) -> dict:
         _ec_unload()
         raise ToolError("The microphone stream didn't start (is the mic in use or muted?).")
     notify_desktop("ROSE: someone is listening through the microphone", mic["description"], urgency="critical")
-    return {"stream": f"http://127.0.0.1:{LISTEN_PORT}/live.webm", "source": mic["name"],
+    return {"stream": f"http://127.0.0.1:{LISTEN_PORT}/{LISTEN_FILES[format]}", "format": format, "source": mic["name"],
             "description": mic["description"], "max_minutes": LISTEN_MAX_SECONDS // 60,
             "echo_cancel": bool(mod), "play_to": EC_SINK if mod else ""}
 

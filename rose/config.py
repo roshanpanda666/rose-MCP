@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
     "max_read_bytes": 1_000_000,
     "input_enabled": True,
     "webcam_device": "",
+    "webcam_live_quality": "medium",
+    "screen_live_quality": "medium",
     "bridge_path": "",
     "bridge_email_enabled": True,
     "bridge_email_to": [],
@@ -76,6 +78,9 @@ DEFAULT_CONFIG = {
     "claude_push_enabled": True,
     "claude_job_timeout": 1800,
     "phone_country_code": "91",
+    "clipboard_history": True,
+    "downloads_autosort": False,
+    "downloads_autosort_days": 7,
 }
 
 _COMMENTS = {
@@ -87,6 +92,8 @@ _COMMENTS = {
     "max_read_bytes": "read_file and content search skip files bigger than this",
     "input_enabled": "Set false to turn off mouse and keyboard control",
     "webcam_device": 'Default camera for webcam_capture, e.g. "/dev/video0" ("" = first camera)',
+    "webcam_live_quality": 'Webcam live view quality: "low" (640x480), "medium" (960x544) or "high" (1280x720)',
+    "screen_live_quality": 'Phone live screen video: "low" (1280 px, 8 fps), "medium" (1600 px, 10 fps) or "high" (1920 px, 15 fps)',
     "bridge_path": 'Bridge markdown file ("" = ~/rose/bridge/BRIDGE.md)',
     "oauth_redirect_hosts": "OAuth clients may only redirect back to these hosts",
     "bridge_email_enabled": "Email a copy of every bridge post (sender set up with `rose email setup`)",
@@ -123,6 +130,9 @@ _COMMENTS = {
     "phone_app_url": "Phone app base URL (trigger confirm links)",
     "claude_push_enabled": "Push to the phone when Claude Code finishes or needs you (Claude Code hooks)",
     "phone_country_code": "Country code added to phone numbers saved without one (phone_call / phone_message)",
+    "clipboard_history": "Keep the last 50 copied texts for clipboard_history (passwords/keys are skipped)",
+    "downloads_autosort": "rose-watch tidies ~/Downloads into type folders once a day (sort_downloads)",
+    "downloads_autosort_days": "Daily Downloads tidy only moves files older than this many days",
     "claude_job_timeout": "Max seconds for a background Claude Code job (hand_to_claude mode=background)",
     "companion_env_file": "File with that backend's APP_TOKEN (read by `rose face`)",
     "live_view_min_side": "Live screen view (screen_frame): frames are at least this many px on the long side (1920 = native, sharpest)",

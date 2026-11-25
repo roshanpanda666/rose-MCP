@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -150,3 +151,172 @@ def search_files(
             if len(hits) >= max_results:
                 return "\n".join(hits) + f"\n(stopped at {max_results} results)"
     return "\n".join(hits) if hits else "No matching files."
+
+
+# ---------------- copy / trash / edit / archives ----------------
+
+TRASH = Path.home() / ".local" / "share" / "Trash"
+MAX_UNZIP_BYTES = 4 * 1024**3
+
+
+def copy_target(source: str, destination: str) -> tuple[Path, Path]:
+    """(src, final destination) for copy_file: copying into an existing folder keeps the source's name."""
+    src = _resolve(source)
+    dst = _resolve(destination)
+    if dst.is_dir():
+        dst = _resolve(str(dst / src.name))
+    return src, dst
+
+
+def copy_file(source: str, destination: str, confirm: bool = False) -> str:
+    """Copy a file or folder. Into an existing folder keeps the name. Replacing a file needs confirm=true."""
+    src, dst = copy_target(source, destination)
+    if not src.exists():
+        raise ToolError(f"Source does not exist: {src}")
+    if dst == src or dst.is_relative_to(src):
+        raise ToolError(f"Can't copy {src} into itself.")
+    if dst.exists():
+        if dst.is_dir():
+            raise ToolError(f"{dst} is an existing folder; ROSE won't replace folders.")
+        if not confirm:
+            raise ToolError(f"{dst} already exists. To replace it, call again with confirm=true.")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        shutil.copytree(src, dst, symlinks=True)
+    else:
+        shutil.copy2(src, dst)
+    return f"Copied {src} -> {dst}"
+
+
+def _trash_info(p: Path) -> Path | None:
+    """The newest .trashinfo in the home trash whose Path= is `p`."""
+    from urllib.parse import unquote
+
+    best = None
+    for info in (TRASH / "info").glob("*.trashinfo"):
+        try:
+            text = info.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("Path=") and Path(unquote(line[5:])) == p:
+                if best is None or info.stat().st_mtime > best.stat().st_mtime:
+                    best = info
+    return best
+
+
+def trash_file(path: str, confirm: bool = False) -> str:
+    """Move a file or folder to the Trash (recoverable; undo_last puts it back). Needs confirm=true."""
+    p = _resolve(path)
+    if not p.exists() and not p.is_symlink():
+        raise ToolError(f"Does not exist: {p}")
+    if p in allowed_dirs() or p == Path.home():
+        raise ToolError(f"{p} is an allowed root folder; ROSE won't trash it.")
+    if not confirm:
+        raise ToolError(f"Moving {p} to the Trash needs confirm=true. Ask the user first.")
+    proc = subprocess.run(["gio", "trash", str(p)], capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise ToolError(f"Couldn't trash {p}: {(proc.stderr or proc.stdout).strip()[:300]}")
+    info = _trash_info(p)
+    return f"Moved {p} to the Trash" + (f" (as {info.stem})" if info else "")
+
+
+def edit_file(path: str, find: str = "", replace: str = "", replace_all: bool = False, append: str = "") -> str:
+    """Change part of a text file: replace exact text `find` with `replace` (one match unless replace_all), and/or
+    add `append` at the end. Undo restores the old file."""
+    p = _resolve(path)
+    if not p.is_file():
+        raise ToolError(f"Not a file: {p}")
+    if not find and not append:
+        raise ToolError("Give `find` (with `replace`) and/or `append`.")
+    if p.stat().st_size > load_config()["max_read_bytes"]:
+        raise ToolError(f"{p} is too big to edit here.")
+    try:
+        text = p.read_text()
+    except UnicodeDecodeError:
+        raise ToolError(f"{p} is not a UTF-8 text file.") from None
+    changes = []
+    if find:
+        n = text.count(find)
+        if n == 0:
+            raise ToolError(f"Text not found in {p.name}; read_file it and copy the exact text.")
+        if n > 1 and not replace_all:
+            raise ToolError(f"The text appears {n} times in {p.name}; add more context or set replace_all=true.")
+        text = text.replace(find, replace)
+        changes.append(f"replaced {n} match{'es' if n > 1 else ''}")
+    if append:
+        if text and not text.endswith("\n") and not append.startswith("\n"):
+            text += "\n"
+        text += append
+        changes.append(f"appended {len(append)} characters")
+    p.write_text(text)
+    return f"Edited {p}: " + " and ".join(changes)
+
+
+def zip_files(paths: list[str], archive: str) -> str:
+    """Zip files/folders into a new .zip archive."""
+    import zipfile
+
+    if not paths:
+        raise ToolError("Nothing to zip.")
+    out = _resolve(archive if archive.lower().endswith(".zip") else archive + ".zip")
+    if out.exists():
+        raise ToolError(f"{out} already exists; pick another name.")
+    srcs = [_resolve(s) for s in paths]
+    for s in srcs:
+        if not s.exists():
+            raise ToolError(f"Does not exist: {s}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for s in srcs:
+                if s.is_dir():
+                    for f in sorted(s.rglob("*")):
+                        if f.is_file() and not f.is_symlink() and f != out:
+                            z.write(f, f.relative_to(s.parent))
+                            count += 1
+                else:
+                    z.write(s, s.name)
+                    count += 1
+    except Exception:
+        out.unlink(missing_ok=True)
+        raise
+    return f"Created {out} ({count} files, {_fmt_size(out.stat().st_size)})"
+
+
+def unzip_target(archive: str, destination: str = "") -> tuple[Path, Path]:
+    src = _resolve(archive)
+    dst = _resolve(destination) if destination else _resolve(str(src.parent / src.stem))
+    return src, dst
+
+
+def unzip_file(archive: str, destination: str = "") -> str:
+    """Extract a .zip (default: a folder named after it, next to it). Never overwrites existing files."""
+    import zipfile
+
+    src, dst = unzip_target(archive, destination)
+    if not src.is_file():
+        raise ToolError(f"Not a file: {src}")
+    try:
+        z = zipfile.ZipFile(src)
+    except zipfile.BadZipFile:
+        raise ToolError(f"{src.name} is not a valid zip file.") from None
+    with z:
+        members = [m for m in z.infolist() if not m.is_dir()]
+        if sum(m.file_size for m in members) > MAX_UNZIP_BYTES:
+            raise ToolError(f"{src.name} would unpack to over {_fmt_size(MAX_UNZIP_BYTES)}; refusing.")
+        targets = []
+        for m in members:
+            t = (dst / m.filename).resolve()
+            if not t.is_relative_to(dst):
+                raise ToolError(f"{src.name} contains an unsafe path ({m.filename}); refusing.")
+            if t.exists():
+                raise ToolError(f"{t} already exists; extract somewhere else.")
+            targets.append((m, t))
+        for m, t in targets:
+            t.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(m) as fin, open(t, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+    dst.mkdir(parents=True, exist_ok=True)
+    return f"Extracted {len(targets)} files from {src.name} to {dst}"

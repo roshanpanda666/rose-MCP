@@ -85,6 +85,20 @@ def test_rate_limit(remote, monkeypatch):
         tool()
 
 
+def test_live_frames_have_their_own_rate_budget(remote, monkeypatch):
+    monkeypatch.setattr(guard, "RATE_LIMIT", (2, 60))
+    monkeypatch.setattr(guard, "LIVE_RATE_LIMIT", (5, 60))
+    frame = guard.guarded("screen_frame", lambda: "frame", read_only=True)
+    tool = guard.guarded("fake_read", lambda: "ok", read_only=True)
+    for _ in range(5):
+        frame()
+    tool(), tool()  # the live view didn't use up the normal budget
+    with pytest.raises(ToolError, match="Too many"):
+        frame()
+    with pytest.raises(ToolError, match="Too many"):
+        tool()
+
+
 def test_untrusted_tools_are_labelled(remote):
     tool = guard.guarded("read_file", lambda path: "file text", read_only=True)
     assert tool("x")["_untrusted_content_notice"] == guard.UNTRUSTED_NOTE
