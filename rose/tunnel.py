@@ -101,6 +101,22 @@ def _start_ngrok(port: int, log) -> tuple[subprocess.Popen, str]:
     raise RuntimeError(f"ngrok did not start the tunnel. Log tail:\n{tail}")
 
 
+RECHECK_SECONDS = 60  # how often a running tunnel re-proves that auth is still enforced
+
+
+def _exposed(base: str) -> str:
+    """'' while auth holds; else what answered without credentials (2xx/3xx = open to the internet).
+    A down server (None/5xx) isn't exposure: there is nothing behind the URL then."""
+    from rose import fingerprint
+    code = probe_unauth(base)
+    if code is not None and 200 <= code < 400:
+        return f"/mcp answered {code} without credentials"
+    code = _code(f"{base}{fingerprint.DEVICE_KEYS_PATH}", timeout=10)
+    if code is not None and 200 <= code < 400:
+        return f"{fingerprint.DEVICE_KEYS_PATH} answered {code} without a session"
+    return ""
+
+
 def run() -> int:
     """Start the tunnel, point ROSE at it, verify auth, then stay up until the tunnel exits."""
     from rose import auth
@@ -114,6 +130,10 @@ def run() -> int:
         print("Tunnel setup incomplete: " + "; ".join(missing), file=sys.stderr)
         return 1
     port = load_config()["http_port"]
+    local = _exposed(f"http://127.0.0.1:{port}")
+    if local:  # never publish a server that is already open locally
+        print(f"Refusing: the local ROSE server is not enforcing auth ({local}).", file=sys.stderr)
+        return 1
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log = open(LOG_DIR / "tunnel.log", "w")
     try:
@@ -155,6 +175,19 @@ def run() -> int:
     note = "permanent URL" if is_permanent() else "new URL: update it in Claude → Connectors"
     print(f"ROSE is live (auth enforced, {note}): {url}/mcp", flush=True)
     notify_desktop("ROSE remote access is live", f"{url}/mcp ({note})")
-    rc = proc.wait()
+    # Keep proving it: if ROSE later restarts without auth (bad config, broken deploy), close the tunnel.
+    while (rc := proc.poll()) is None:
+        try:
+            proc.wait(timeout=RECHECK_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        bad = _exposed(url)
+        if bad:
+            print(f"SAFETY CHECK FAILED while live: {bad}. Shutting the tunnel down.", file=sys.stderr, flush=True)
+            notify_desktop("ROSE tunnel shut down", f"Auth check failed: {bad}", urgency="critical")
+            proc.terminate()
+            return 1
+    rc = proc.poll()
     print(f"Tunnel exited ({rc}).", file=sys.stderr)
     return 1

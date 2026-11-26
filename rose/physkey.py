@@ -33,6 +33,18 @@ def random_key() -> str:
     return secrets.choice(sorted(KEY_CODES))
 
 
+def random_sequence(n: int = 3) -> str:
+    """n distinct keys to press in order, space-separated (e.g. "K F7 Q"): one common key alone is too easy to
+    hit by accident while typing."""
+    pool = sorted(KEY_CODES)
+    out: list[str] = []
+    while len(out) < n:
+        k = secrets.choice(pool)
+        if k not in out:
+            out.append(k)
+    return " ".join(out)
+
+
 def _has_key(bitmap: str, code: int) -> bool:
     words = bitmap.split()[::-1]  # the kernel prints the highest word first
     idx, bit = divmod(code, 64)
@@ -78,10 +90,12 @@ def keyboards(code: int = KEY_CODES["K"]) -> list[str]:
 
 
 def wait_for_key(key: str, timeout: float = 60.0) -> bool:
-    """True once `key` is pressed on a physical keyboard within `timeout` seconds; other keys are ignored.
+    """True once `key` is pressed on a physical keyboard within `timeout` seconds. `key` may be a space-separated
+    sequence ("K F7 Q"): those keys must be pressed in that order, and any other key press starts it over.
 
     Raises RuntimeError if no physical keyboard can be read (permissions, or none attached)."""
-    code = KEY_CODES[key]
+    codes = [KEY_CODES[k] for k in key.split()]
+    code, step = codes[0], 0
     fds = []
     for path in keyboards(code):
         try:
@@ -105,8 +119,14 @@ def wait_for_key(key: str, timeout: float = 60.0) -> bool:
                     continue
                 for off in range(0, len(data) - _EVENT.size + 1, _EVENT.size):
                     _, _, typ, c, value = _EVENT.unpack_from(data, off)
-                    if typ == EV_KEY and c == code and value == 1:  # press (not release / autorepeat)
-                        return True
+                    if typ != EV_KEY or value != 1:  # presses only (not release / autorepeat)
+                        continue
+                    if c == codes[step]:
+                        step += 1
+                        if step == len(codes):
+                            return True
+                    else:
+                        step = 1 if c == codes[0] else 0
             if not fds:
                 raise RuntimeError("Lost access to the keyboard")
         return False

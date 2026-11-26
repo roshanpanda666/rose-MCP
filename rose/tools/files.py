@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -15,8 +16,53 @@ from rose.config import allowed_dirs, load_config
 MAX_RESULTS = 200
 
 
-def _resolve(path: str) -> Path:
-    """Resolve `path` (following symlinks) and refuse anything outside the allowlist."""
+# Never written by the file tools: things that run code on their own (git hooks/config, editor tasks, direnv,
+# dev containers). A write there turns "edit a file" into "run any command" (e.g. core.fsmonitor in .git/config).
+PROTECTED_PARTS = {".git", ".hg", ".svn", ".vscode", ".idea", ".husky", ".githooks", ".devcontainer", ".direnv"}
+PROTECTED_NAMES = {".envrc", ".gitmodules"}
+# Never read, written or packed by the file tools: credentials. Templates (.env.example etc.) stay readable.
+SECRET_NAME_RE = re.compile(
+    r"^(\.env(\.(?!example$|sample$|template$|dist$)[^/]+)?|.+\.(pem|key|p12|pfx|kdbx|keystore|jks)"
+    r"|id_(rsa|dsa|ecdsa|ed25519)|\.npmrc|\.pypirc|\.netrc|\.git-credentials|credentials(\.[^/]+)?\.json"
+    r"|client_secret[^/]*\.json|service[-_]account[^/]*\.json)$", re.IGNORECASE)
+
+
+def is_secret_name(name: str) -> bool:
+    """True for credential files the file tools refuse to touch (.env, private keys, .netrc, ...)."""
+    return bool(SECRET_NAME_RE.match(name))
+
+
+def _protected_roots() -> list[Path]:
+    """ROSE's own source tree (when run from a checkout) plus config `protected_paths`: never written."""
+    roots = []
+    pkg = Path(__file__).resolve().parent.parent  # rose/
+    if (pkg.parent / "pyproject.toml").exists():
+        roots.append(pkg.parent)
+    for x in load_config().get("protected_paths") or []:
+        try:
+            roots.append(Path(x).expanduser().resolve())
+        except (OSError, RuntimeError, TypeError):
+            continue
+    return roots
+
+
+def check_writable(p: Path) -> Path:
+    """Refuse writes to self-running config (.git/, .vscode/, .envrc, ...), credentials and ROSE itself."""
+    if is_secret_name(p.name):
+        raise ToolError(f"Access denied: {p.name} looks like a credentials file; ROSE's file tools don't touch those.")
+    bad = PROTECTED_PARTS.intersection(p.parts)
+    if bad or p.name in PROTECTED_NAMES:
+        raise ToolError(f"Access denied: ROSE won't write inside {(sorted(bad) or [p.name])[0]} (it can run code "
+                        "on its own). Edit it yourself if you really mean to.")
+    for root in _protected_roots():
+        if p == root or p.is_relative_to(root):
+            raise ToolError(f"Access denied: {p} is inside a protected folder ({root}).")
+    return p
+
+
+def _resolve(path: str, write: bool = False) -> Path:
+    """Resolve `path` (following symlinks) and refuse anything outside the allowlist, credential files, and (for
+    write=True) protected paths."""
     p = Path(path).expanduser()
     if not p.is_absolute():
         # Relative paths are taken relative to the first allowlisted dir (the ROSE workspace).
@@ -28,6 +74,10 @@ def _resolve(path: str) -> Path:
             f"Access denied: {p} is outside the allowed folders: "
             + ", ".join(str(r) for r in roots)
         )
+    if is_secret_name(p.name):
+        raise ToolError(f"Access denied: {p.name} looks like a credentials file; ROSE's file tools don't touch those.")
+    if write:
+        check_writable(p)
     return p
 
 
@@ -81,14 +131,16 @@ def read_file(path: str, offset: int = 0) -> str:
 
 
 def write_file(path: str, content: str, overwrite: bool = False, confirm: bool = False) -> str:
-    """Write a text file. Replacing one needs overwrite=true and confirm=true."""
-    p = _resolve(path)
+    """Write a text file (needs confirm=true; replacing one also needs overwrite=true)."""
+    p = _resolve(path, write=True)
     if p.is_dir():
         raise ToolError(f"{p} is a directory.")
     if p.exists() and not (overwrite and confirm):
         raise ToolError(
             f"{p} already exists. To replace it, call again with overwrite=true and confirm=true."
         )
+    if not confirm:
+        raise ToolError(f"Writing {p} needs confirm=true: ask the user first.")
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return f"Wrote {len(content)} characters to {p}"
@@ -96,7 +148,7 @@ def write_file(path: str, content: str, overwrite: bool = False, confirm: bool =
 
 def create_folder(path: str) -> str:
     """Create a folder (and any missing parents). Fine if it already exists."""
-    p = _resolve(path)
+    p = _resolve(path, write=True)
     if p.exists() and not p.is_dir():
         raise ToolError(f"{p} exists and is a file, not a folder.")
     if p.is_dir():
@@ -107,13 +159,13 @@ def create_folder(path: str) -> str:
 
 def move_file(source: str, destination: str, confirm: bool = False) -> str:
     """Move/rename a file or folder. Replacing a file needs confirm=true."""
-    src = _resolve(source)
-    dst = _resolve(destination)
+    src = _resolve(source, write=True)
+    dst = _resolve(destination, write=True)
     if not src.exists():
         raise ToolError(f"Source does not exist: {src}")
     if dst.is_dir():
         dst = dst / src.name
-        _resolve(str(dst))
+        _resolve(str(dst), write=True)
     if dst.exists():
         if not confirm:
             raise ToolError(f"{dst} already exists. To replace it, call again with confirm=true.")
@@ -138,7 +190,7 @@ def search_files(
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "node_modules"]
         for name in filenames:
-            if not fnmatch.fnmatch(name.lower(), name_pattern.lower()):
+            if not fnmatch.fnmatch(name.lower(), name_pattern.lower()) or is_secret_name(name):
                 continue
             fp = Path(dirpath) / name
             if needle:
@@ -162,9 +214,9 @@ MAX_UNZIP_BYTES = 4 * 1024**3
 def copy_target(source: str, destination: str) -> tuple[Path, Path]:
     """(src, final destination) for copy_file: copying into an existing folder keeps the source's name."""
     src = _resolve(source)
-    dst = _resolve(destination)
+    dst = _resolve(destination, write=True)
     if dst.is_dir():
-        dst = _resolve(str(dst / src.name))
+        dst = _resolve(str(dst / src.name), write=True)
     return src, dst
 
 
@@ -182,7 +234,7 @@ def copy_file(source: str, destination: str, confirm: bool = False) -> str:
             raise ToolError(f"{dst} already exists. To replace it, call again with confirm=true.")
     dst.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
-        shutil.copytree(src, dst, symlinks=True)
+        shutil.copytree(src, dst, symlinks=True, ignore=lambda _d, names: [n for n in names if is_secret_name(n)])
     else:
         shutil.copy2(src, dst)
     return f"Copied {src} -> {dst}"
@@ -207,7 +259,7 @@ def _trash_info(p: Path) -> Path | None:
 
 def trash_file(path: str, confirm: bool = False) -> str:
     """Move a file or folder to the Trash (recoverable; undo_last puts it back). Needs confirm=true."""
-    p = _resolve(path)
+    p = _resolve(path, write=True)
     if not p.exists() and not p.is_symlink():
         raise ToolError(f"Does not exist: {p}")
     if p in allowed_dirs() or p == Path.home():
@@ -221,10 +273,11 @@ def trash_file(path: str, confirm: bool = False) -> str:
     return f"Moved {p} to the Trash" + (f" (as {info.stem})" if info else "")
 
 
-def edit_file(path: str, find: str = "", replace: str = "", replace_all: bool = False, append: str = "") -> str:
+def edit_file(path: str, find: str = "", replace: str = "", replace_all: bool = False, append: str = "",
+              confirm: bool = False) -> str:
     """Change part of a text file: replace exact text `find` with `replace` (one match unless replace_all), and/or
-    add `append` at the end. Undo restores the old file."""
-    p = _resolve(path)
+    add `append` at the end. Needs confirm=true. Undo restores the old file."""
+    p = _resolve(path, write=True)
     if not p.is_file():
         raise ToolError(f"Not a file: {p}")
     if not find and not append:
@@ -249,6 +302,8 @@ def edit_file(path: str, find: str = "", replace: str = "", replace_all: bool = 
             text += "\n"
         text += append
         changes.append(f"appended {len(append)} characters")
+    if not confirm:
+        raise ToolError(f"Editing {p.name} ({' and '.join(changes)}) needs confirm=true: ask the user first.")
     p.write_text(text)
     return f"Edited {p}: " + " and ".join(changes)
 
@@ -259,7 +314,7 @@ def zip_files(paths: list[str], archive: str) -> str:
 
     if not paths:
         raise ToolError("Nothing to zip.")
-    out = _resolve(archive if archive.lower().endswith(".zip") else archive + ".zip")
+    out = _resolve(archive if archive.lower().endswith(".zip") else archive + ".zip", write=True)
     if out.exists():
         raise ToolError(f"{out} already exists; pick another name.")
     srcs = [_resolve(s) for s in paths]
@@ -273,7 +328,7 @@ def zip_files(paths: list[str], archive: str) -> str:
             for s in srcs:
                 if s.is_dir():
                     for f in sorted(s.rglob("*")):
-                        if f.is_file() and not f.is_symlink() and f != out:
+                        if f.is_file() and not f.is_symlink() and f != out and not is_secret_name(f.name):
                             z.write(f, f.relative_to(s.parent))
                             count += 1
                 else:
@@ -287,7 +342,7 @@ def zip_files(paths: list[str], archive: str) -> str:
 
 def unzip_target(archive: str, destination: str = "") -> tuple[Path, Path]:
     src = _resolve(archive)
-    dst = _resolve(destination) if destination else _resolve(str(src.parent / src.stem))
+    dst = _resolve(destination, write=True) if destination else _resolve(str(src.parent / src.stem), write=True)
     return src, dst
 
 
@@ -311,6 +366,7 @@ def unzip_file(archive: str, destination: str = "") -> str:
             t = (dst / m.filename).resolve()
             if not t.is_relative_to(dst):
                 raise ToolError(f"{src.name} contains an unsafe path ({m.filename}); refusing.")
+            check_writable(t)  # no .git/hooks, .vscode/tasks.json, .envrc or credentials from an archive
             if t.exists():
                 raise ToolError(f"{t} already exists; extract somewhere else.")
             targets.append((m, t))

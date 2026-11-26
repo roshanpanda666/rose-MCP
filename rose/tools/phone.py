@@ -23,7 +23,7 @@ from io import BytesIO
 from typing import Literal
 
 from rose.common import ToolError, launch_detached, require
-from rose.config import ROSE_HOME
+from rose.config import ROSE_HOME, load_config
 
 ADDR_RE = re.compile(r"^[\w.:\[\]-]+:\d{2,5}$")
 PKG_RE = re.compile(r"^[a-zA-Z][\w]*(\.[\w]+)+$")
@@ -197,6 +197,9 @@ def _enable_remote(address: str) -> str:
     """Make the phone reachable off home Wi-Fi: Wireless debugging turns itself off on mobile data and its
     port changes, so switch adbd to the fixed TCP port REMOTE_PORT (stays until the phone reboots) and save
     the phone's Tailscale address. Returns that address, or "" (reason saved as remote_error)."""
+    if not load_config().get("phone_remote_adb", True):
+        _save_last(remote_error="Remote phone access is off (phone_remote_adb = false).")
+        return ""
     _save_last(remote_try=time.time())
     ts = _tailscale_phone_ip()
     if not ts:
@@ -209,11 +212,12 @@ def _enable_remote(address: str) -> str:
         if "restarting" not in out.lower():
             _save_last(remote_error=f"adb tcpip {REMOTE_PORT} failed: {out.strip()[-160:] or 'no output'}")
             return ""
-        local = f"{host}:{REMOTE_PORT}"
+        # Legacy `adb tcpip` has no encryption, so ROSE only ever talks to port 5555 through Tailscale (WireGuard),
+        # never over the LAN address in clear, even at home.
         for _ in range(8):  # adbd needs a moment to come back on the new port
             time.sleep(1)
-            if _connected(_raw("connect", local)):
-                _save_last(address=local)
+            if _connected(_raw("connect", remote)):
+                _save_last(address=remote)
                 break
         else:
             _raw("connect", address)  # keep the original link if 5555 didn't come up

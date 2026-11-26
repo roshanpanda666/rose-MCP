@@ -8,12 +8,14 @@ How a remote call is decided (guard.guarded calls gate()):
 1. Lost-phone mode armed (`rose fingerprint lost on`): every call parks and only the laptop fallback
    (passphrase + a physical key press on the laptop) approves it.
 2. Phone locked (ADB keyguard / screen asleep) -> the call is refused at once.
-3. A short window (fingerprint_window_minutes, 1-10, default 5) opened by the last fingerprint lets that
+3. Trusted clients (fingerprint_trusted_clients, default the Rose apps: "Phone app") run every tool without
+   a fingerprint, while the phone isn't locked.
+4. A short window (fingerprint_window_minutes, 1-10, default 2) opened by the last fingerprint lets that
    same caller run non-"fresh" tools without asking, only while the phone is known to be unlocked. It ends
    at once when the phone locks. Fresh tools (calls, messages, camera, mic) always need a new fingerprint.
-4. Live frames (webcam_live_frame / screen_frame) run while the matching stream start was approved for
+5. Live frames (webcam_live_frame / screen_frame) run while the matching stream start was approved for
    this caller, until the phone locks or the stream stops.
-5. Anything else parks: the phone gets a push that opens the approval page; "Approve with fingerprint"
+6. Anything else parks: the phone gets a push that opens the approval page; "Approve with fingerprint"
    asks the phone's passkey (userVerification=required) and ROSE checks the signature against the key
    registered with `rose fingerprint register`.
 
@@ -124,9 +126,15 @@ def enabled() -> bool:
 
 def window_minutes() -> int:
     try:
-        return min(10, max(1, int(load_config().get("fingerprint_window_minutes", 5))))
+        return min(10, max(1, int(load_config().get("fingerprint_window_minutes", 2))))
     except (TypeError, ValueError):
-        return 5
+        return 2
+
+
+def trusted(who: str) -> bool:
+    """The Rose apps: their calls never need a fingerprint (a locked phone or lost-phone mode still block)."""
+    v = load_config().get("fingerprint_trusted_clients", ["Phone app"])
+    return who in (v if isinstance(v, list) else [])
 
 
 def fresh_tools() -> set[str]:
@@ -235,17 +243,28 @@ def registration_valid(tok: str) -> bool:
     return _reg_entry(_passkeys(), tok) is not None
 
 
-def _lockout_check() -> None:
+# Failed attempts are counted per kind, so a flood of bad signatures (anyone can POST garbage to the public
+# routes) can't lock out passphrase approvals and vice versa. Requests naming an unknown key, approval or
+# registration never count: only real attempts against something that exists do.
+PASSPHRASE, SIGNATURE = "passphrase", "signature"
+_sig_failures: list[float] = []
+
+
+def _bucket(kind: str) -> list[float]:
     from rose import guard
+    return guard._approve_failures if kind == PASSPHRASE else _sig_failures  # passphrase: shared with /rose/approve
+
+
+def _lockout_check(kind: str = PASSPHRASE) -> None:
     now = time.time()
-    guard._approve_failures[:] = [t for t in guard._approve_failures if now - t < 900]
-    if len(guard._approve_failures) >= 5:
+    q = _bucket(kind)
+    q[:] = [t for t in q if now - t < 900]
+    if len(q) >= 5:
         raise PermissionError("Too many failed attempts. Try again in 15 minutes.")
 
 
-def _fail() -> None:
-    from rose import guard
-    guard._approve_failures.append(time.time())
+def _fail(kind: str = PASSPHRASE) -> None:
+    _bucket(kind).append(time.time())
 
 
 def registration_options(tok: str, passphrase: str) -> dict:
@@ -280,7 +299,7 @@ def registration_options(tok: str, passphrase: str) -> dict:
 
 def registration_finish(tok: str, data: dict) -> dict:
     """Verify the attestation and store the passkey; the token is used up on success."""
-    _lockout_check()
+    _lockout_check(SIGNATURE)
     rp_id, origin = rp()
     with _file_lock:
         s = _passkeys()
@@ -294,7 +313,7 @@ def registration_finish(tok: str, data: dict) -> dict:
                                                webauthn.b64u_dec(data.get("attestationObject", "")),
                                                challenge, origin, rp_id)
         except webauthn.WebAuthnError as err:
-            _fail()
+            _fail(SIGNATURE)
             _event("registration_failed", who="phone", reason=str(err))
             raise PermissionError(f"Passkey check failed: {err}") from None
         cid = webauthn.b64u(res["cred_id"])
@@ -477,6 +496,8 @@ def status() -> dict:
     return {"mode": mode(), "passkeys": [p["name"] for p in list_passkeys() + list_device_keys()],
             "phone": _read(LOCK_STATE, {}).get("state", "unknown"), "lost_mode": lost_armed(),
             "window_minutes": window_minutes(),
+            "trusted": [c for c in (load_config().get("fingerprint_trusted_clients", ["Phone app"]) or [])
+                        if isinstance(c, str)],
             "windows": {k: int(v["until"] - now) for k, v in _read(WINDOWS, {}).items() if v.get("until", 0) > now}}
 
 
@@ -492,6 +513,18 @@ def _notify_push(title: str, message: str, priority: str = "low", tags: str = ""
         pushmod.push(title, message, priority=priority, tags=tags, desktop=False)
     except Exception:
         pass
+
+
+_warn_sent: dict[str, float] = {}
+WARN_PUSH_EVERY = 300  # at most one push per warning title per 5 minutes (failed checks are attacker-triggerable)
+
+
+def _warn_push(title: str, message: str) -> None:
+    now = time.time()
+    if now - _warn_sent.get(title, 0) < WARN_PUSH_EVERY:
+        return
+    _warn_sent[title] = now
+    _notify_push(title, message, "high", "warning")
 
 
 def note_call(who: str, tool: str) -> None:
@@ -548,7 +581,9 @@ def _new_approval(name: str, args: dict, who: str, fresh: bool, lost: bool = Fal
         pushmod.push("🔐 ROSE fingerprint needed" if not lost else "🔐 ROSE approval (lost-phone mode)",
                      f"{who} wants to run {name}. " + ("Tap and touch the sensor." if app else "Tap to review."),
                      url=app_link("approve", u=url) if app else url, priority="high", tags="lock", desktop=True,
-                     actions=[{"action": "view", "label": "Open page", "url": url, "clear": True}] if app else None)
+                     actions=[{"action": "view", "label": "Approve 🔑", "url": app_link("approve", u=url), "clear": True},
+                              {"action": "view", "label": "Open page", "url": url, "clear": True}] if app else None,
+                     approve_url=url if app else "")
     except Exception:
         pass
     return {
@@ -574,8 +609,9 @@ def _pending_for(who: str, name: str) -> dict | None:
     return None
 
 
-def gate(name: str, bound: dict, who: str) -> dict | None:
-    """Decide one gated call: None = run it now; a dict = parked (approval link); raises ToolError = denied."""
+def gate(name: str, bound: dict, who: str, fresh: bool = False) -> dict | None:
+    """Decide one gated call: None = run it now; a dict = parked (approval link); raises ToolError = denied.
+    fresh=True (code-running, data-moving, confirm=true calls): never covered by an open window."""
     if name in ALWAYS_ALLOWED:
         _event("allowed_always", name, who)
         return None
@@ -588,6 +624,9 @@ def gate(name: str, bound: dict, who: str) -> dict | None:
         raise ToolError("The user's phone is locked, so ROSE refuses every action right now. Tell the user to "
                         "unlock their phone and ask again (or, if the phone is lost, use `rose fingerprint lost on` "
                         "on the laptop).")
+    if trusted(who):  # the Rose apps: no fingerprint (lost-phone mode and a locked phone were checked above)
+        _event("allowed_trusted", name, who)
+        return None
     if name in STREAM_OF_FRAME:
         if state == "unlocked" and _ticket_valid(who, STREAM_OF_FRAME[name]):
             _event("allowed_stream", name, who)
@@ -595,7 +634,7 @@ def gate(name: str, bound: dict, who: str) -> dict | None:
         if name == "webcam_live_frame":
             raise ToolError("No approved webcam live view: call webcam_live_stream first (it needs the user's "
                             "fingerprint), then poll webcam_live_frame.")
-    fresh = name in fresh_tools()
+    fresh = fresh or name in fresh_tools()
     if not fresh and state == "unlocked" and window_active(who):
         _event("allowed_window", name, who)
         return None
@@ -657,14 +696,12 @@ def assertion_options(rec: dict) -> dict:
 def approve_webauthn(aid: str, data: dict) -> dict:
     """Verify a passkey assertion for a parked fingerprint approval, then run the call exactly once."""
     from rose import guard
-    _lockout_check()
-    rec = guard.load_approval(aid)
-    if not rec or rec["status"] != "pending":
-        raise LookupError(f"This approval is {rec['status'] if rec else 'unknown'}.")
-    if rec.get("mode") != "fingerprint":
-        raise PermissionError("This approval uses the passphrase, not a fingerprint.")
-    if rec.get("lost") or lost_armed():
-        raise PermissionError("Lost-phone mode is on: approve with the laptop fallback below.")
+    _lockout_check(SIGNATURE)
+    _pending_fp(aid)
+    cid = data.get("credentialId", "")
+    if not isinstance(cid, str) or cid not in _passkeys()["credentials"]:
+        # Unknown passkey: not an attempt at all (no strike, no push, the challenge stays valid for the owner).
+        raise LookupError("Unknown passkey: register it with `rose fingerprint register` first.")
     rp_id, origin = rp()
     with _claim_lock:  # use up this challenge now, whatever happens (single use)
         rec = guard.load_approval(aid)
@@ -675,8 +712,7 @@ def approve_webauthn(aid: str, data: dict) -> dict:
         guard._save(rec)
     with _file_lock:
         s = _passkeys()
-        cid = data.get("credentialId", "")
-        cred = s["credentials"].get(cid) if isinstance(cid, str) else None
+        cred = s["credentials"].get(cid)
         try:
             if not cred:
                 raise webauthn.WebAuthnError("unknown passkey")
@@ -685,10 +721,9 @@ def approve_webauthn(aid: str, data: dict) -> dict:
                 webauthn.b64u_dec(data.get("signature", "")), challenge, origin, rp_id,
                 webauthn.b64u_dec(cred["cose"]), int(cred.get("sign_count", 0)))
         except webauthn.WebAuthnError as err:
-            _fail()
+            _fail(SIGNATURE)
             _event("fingerprint_failed", rec["tool"], rec["caller"], reason=str(err))
-            _notify_push("⚠️ ROSE: fingerprint check failed", f"An approval for {rec['tool']} failed verification.",
-                         "high", "warning")
+            _warn_push("⚠️ ROSE: fingerprint check failed", f"An approval for {rec['tool']} failed verification.")
             raise PermissionError(f"Fingerprint check failed: {err}") from None
         cred["sign_count"], cred["last_used"] = count, int(time.time())
         _save_passkeys(s)
@@ -737,8 +772,11 @@ def approve_device(aid: str, data: dict) -> dict:
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
     from rose import guard
-    _lockout_check()
+    _lockout_check(SIGNATURE)
     _pending_fp(aid)
+    kid0 = data.get("key_id", "")
+    if not isinstance(kid0, str) or kid0 not in _passkeys()["device_keys"]:
+        raise LookupError("Unknown app key (register the app again).")  # no strike, challenge kept
     with _claim_lock:  # the challenge is single use, whatever happens
         rec = guard.load_approval(aid)
         if not rec or rec["status"] != "pending":
@@ -763,10 +801,9 @@ def approve_device(aid: str, data: dict) -> dict:
             except InvalidSignature:
                 raise webauthn.WebAuthnError("signature does not verify") from None
         except (webauthn.WebAuthnError, PermissionError) as err:
-            _fail()
+            _fail(SIGNATURE)
             _event("fingerprint_failed", rec["tool"], rec["caller"], reason=str(err), how="app")
-            _notify_push("⚠️ ROSE: fingerprint check failed", f"An app approval for {rec['tool']} failed verification.",
-                         "high", "warning")
+            _warn_push("⚠️ ROSE: fingerprint check failed", f"An app approval for {rec['tool']} failed verification.")
             raise PermissionError(f"Fingerprint check failed: {err}") from None
         key["last_used"] = int(time.time())
         _save_passkeys(s)
@@ -804,9 +841,11 @@ def manage_open(data: dict) -> dict:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
-    _lockout_check()
+    _lockout_check(SIGNATURE)
     kid = data.get("key_id", "")
     kid = kid if isinstance(kid, str) else ""
+    if kid not in _passkeys()["device_keys"]:
+        raise LookupError("Unknown app key (register the app again).")  # anyone can send this: no strike, no push
     with _manage_lock:
         ch, until = _manage_challenges.pop(kid, ("", 0.0))  # single use, whatever happens
     try:
@@ -823,9 +862,9 @@ def manage_open(data: dict) -> dict:
         except InvalidSignature:
             raise webauthn.WebAuthnError("signature does not verify") from None
     except (webauthn.WebAuthnError, PermissionError, ValueError) as err:
-        _fail()
+        _fail(SIGNATURE)
         _event("manage_failed", who="rose-app", reason=str(err))
-        _notify_push("⚠️ ROSE: security screen check failed", "A Rose app fingerprint check failed.", "high", "warning")
+        _warn_push("⚠️ ROSE: security screen check failed", "A Rose app fingerprint check failed.")
         raise PermissionError(f"Fingerprint check failed: {err}") from None
     tok = secrets.token_urlsafe(32)
     now = time.time()
@@ -869,11 +908,20 @@ def manage_keys(tok: str) -> dict:
                       {"kind": "passkey", "label": "Passkey (WebAuthn, browser prompt)"}]}
 
 
-def manage_remove(tok: str, name: str) -> dict:
+def manage_remove(tok: str, name: str, passphrase: str = "") -> dict:
+    """Revoke a key. The app's own key needs only the session; any other key also needs the ROSE passphrase
+    (one unlocked phone must not be able to strip the owner's other keys)."""
+    from rose import auth
     kid = _manage_session(tok)
     if not isinstance(name, str) or not name:
         raise LookupError("No key name given.")
     own = _passkeys()["device_keys"].get(kid, {}).get("name") == name
+    if not own:
+        _lockout_check()
+        if not auth.check_passphrase(passphrase):
+            _fail()
+            _event("remove_wrong_passphrase", who="rose-app", name=name)
+            raise PermissionError("Removing another key needs the ROSE passphrase.")
     n = remove_passkey(name)
     if not n:
         raise LookupError(f"No key named {name}.")
@@ -947,12 +995,12 @@ def fallback_start(aid: str, passphrase: str, wait: bool = False) -> dict:
         _fail()
         _event("fallback_wrong_passphrase", rec["tool"], rec["caller"])
         raise PermissionError("Wrong passphrase.")
-    key = physkey.random_key()
+    key = physkey.random_sequence()
     rec["fallback"] = {"key": key, "until": time.time() + FALLBACK_SECONDS}
     guard._save(rec)
     _event("fallback_started", rec["tool"], rec["caller"])
     common.notify_desktop("ROSE: press a key to approve",
-                          f"Press {key} on THIS laptop's keyboard within {FALLBACK_SECONDS} s to approve "
+                          f"Press {key} (in that order) on THIS laptop's keyboard within {FALLBACK_SECONDS} s to approve "
                           f"{rec['tool']} for {rec['caller']}. Didn't ask? Do nothing.", urgency="critical")
     _notify_push("⚠️ ROSE laptop fallback used", f"Passphrase entered to approve {rec['tool']} without the phone. "
                  "Not you? Run `rose lockdown on`.", "high", "warning")
@@ -998,7 +1046,7 @@ def local_physical_check(passphrase: str, prompt=print) -> bool:
         _fail()
         _event("lost_mode_wrong_passphrase", who="local")
         return False
-    key = physkey.random_key()
+    key = physkey.random_sequence()
     prompt(f"Press {key} on the laptop's built-in or USB keyboard within {FALLBACK_SECONDS} s...")
     try:
         return physkey.wait_for_key(key, FALLBACK_SECONDS)
@@ -1155,9 +1203,18 @@ def add_routes(mcp) -> None:
         return JSONResponse(obj, code, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
     async def body_json(request: Request) -> dict:
-        raw = await request.body()
-        if len(raw) > 64 * 1024:
-            raise ValueError("too large")
+        limit = 64 * 1024
+        try:
+            if int(request.headers.get("content-length") or 0) > limit:
+                raise ValueError("too large")
+        except (TypeError, ValueError):
+            raise ValueError("too large") from None
+        raw = bytearray()
+        async for chunk in request.stream():  # stop reading at the cap instead of buffering any size
+            raw += chunk
+            if len(raw) > limit:
+                raise ValueError("too large")
+        raw = bytes(raw)
         d = json.loads(raw or b"{}")
         if not isinstance(d, dict):
             raise ValueError("not an object")
@@ -1269,7 +1326,8 @@ def add_routes(mcp) -> None:
             data = await body_json(request)
         except ValueError:
             return json_resp({"message": "Bad request."}, 400)
-        return await manage_call(manage_remove, session_of(request), str(data.get("name", ""))[:60])
+        return await manage_call(manage_remove, session_of(request), str(data.get("name", ""))[:60],
+                                 str(data.get("passphrase", "")))
 
     @mcp.custom_route(DEVICE_REKEY_PATH, methods=["POST"], include_in_schema=False)
     async def manage_rekey_post(request: Request):
@@ -1338,12 +1396,13 @@ def cli(argv: list[str]) -> int:  # noqa: C901 (one branch per subcommand)
         print(f"Open this on your phone within 10 minutes (one use):\n\n  {url}\n")
         if shutil.which("qrencode"):
             subprocess.run(["qrencode", "-t", "ansiutf8", url])
-        try:
-            pushmod.push("🔑 Register ROSE passkey", "Tap to add this phone's fingerprint to ROSE.", url=url,
-                         priority="high", tags="key", desktop=False)
-            time.sleep(2)  # the push is sent from a background thread
-        except Exception:
-            pass
+        if "--push" in args:  # opt-in: the one-time token would otherwise travel through the ntfy server
+            try:
+                pushmod.push("🔑 Register ROSE passkey", "Tap to add this phone's fingerprint to ROSE.", url=url,
+                             priority="high", tags="key", desktop=False)
+                time.sleep(2)  # the push is sent from a background thread
+            except Exception:
+                pass
         print("Then test it: rose fingerprint test")
     elif cmd == "register-app":
         name = args[args.index("--name") + 1] if "--name" in args and args.index("--name") + 1 < len(args) else "phone"
@@ -1352,15 +1411,17 @@ def cli(argv: list[str]) -> int:  # noqa: C901 (one branch per subcommand)
             return 1
         tok = new_registration(name).split("t=", 1)[1]
         link = app_link("register", base=public_base(), t=tok)
-        print(f"On the phone with Rose Voice installed, tap the push or open within 10 minutes (one use):\n\n  {link}\n")
+        print(f"On the phone with Rose Voice installed, scan the QR or open within 10 minutes (one use; add --push to "
+              f"also send it as a phone push):\n\n  {link}\n")
         if shutil.which("qrencode"):
             subprocess.run(["qrencode", "-t", "ansiutf8", link])
-        try:
-            pushmod.push("🔑 Register Rose app fingerprint", "Tap to let the Rose app approve ROSE actions.", url=link,
-                         priority="high", tags="key", desktop=False)
-            time.sleep(2)
-        except Exception:
-            pass
+        if "--push" in args:  # opt-in: the one-time token would otherwise travel through the ntfy server
+            try:
+                pushmod.push("🔑 Register Rose app fingerprint", "Tap to let the Rose app approve ROSE actions.",
+                             url=link, priority="high", tags="key", desktop=False)
+                time.sleep(2)
+            except Exception:
+                pass
         print("Then test it: rose fingerprint test")
     elif cmd == "list":
         keys = list_passkeys() + list_device_keys()
@@ -1384,6 +1445,7 @@ def cli(argv: list[str]) -> int:  # noqa: C901 (one branch per subcommand)
         print(f"Passkeys: {', '.join(st['passkeys']) or 'none'}")
         print(f"Phone (last seen): {st['phone']}    Lost-phone mode: {'ON' if st['lost_mode'] else 'off'}")
         print(f"Window after a fingerprint: {st['window_minutes']} min")
+        print(f"No fingerprint needed (trusted): {', '.join(st['trusted']) or 'none'}")
         for who, left in st["windows"].items():
             print(f"  open window: {who} ({left} s left)")
     elif cmd == "test":

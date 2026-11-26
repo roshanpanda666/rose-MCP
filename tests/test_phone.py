@@ -95,10 +95,11 @@ def test_connect_enables_remote_over_tailscale(adb, monkeypatch):
     adb.dead.add("100.9.9.9:5555")  # not on yet
     adb.script[("connect", "192.168.1.2:45031")] = [(0, "connected to 192.168.1.2:45031")]
     adb.script[("tcpip",)] = [(0, "restarting in TCP mode port: 5555")]
-    adb.script[("connect", "192.168.1.2:5555")] = [(0, "connected to 192.168.1.2:5555")]
+    adb.script[("connect", "100.9.9.9:5555")] = [(0, "connected to 100.9.9.9:5555")]
     msg = P.phone_connect("192.168.1.2:45031")
     assert "100.9.9.9:5555" in msg
-    assert P._load_last() == "192.168.1.2:5555"
+    assert P._load_last() == "100.9.9.9:5555"  # cleartext port 5555 only ever over Tailscale, never the LAN
+    assert not any(c[:2] == ("connect", "192.168.1.2:5555") for c in adb.calls)
     assert P._load_remote() == "100.9.9.9:5555"
 
 

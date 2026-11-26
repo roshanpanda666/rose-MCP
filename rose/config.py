@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "tunnel_provider": "cloudflare",
     "ngrok_domain": "",
     "allowed_dirs": [str(WORKSPACE_DIR), "~/Documents", "~/Downloads", "~/Desktop"],
+    "protected_paths": [],
     "max_read_bytes": 1_000_000,
     "input_enabled": True,
     "webcam_device": "",
@@ -49,7 +50,8 @@ DEFAULT_CONFIG = {
     "approval_mode": "passphrase",
     "approval_required_tools": ["webcam_capture"],
     "approval_grant_minutes": 60,
-    "fingerprint_window_minutes": 5,
+    "fingerprint_window_minutes": 2,
+    "fingerprint_trusted_clients": ["Phone app"],
     "fingerprint_fresh_tools": ["phone_call", "phone_message", "phone_call_control", "webcam_capture",
                                 "webcam_live_stream", "phone_photo", "phone_mic_record", "mic_live_start"],
     "fingerprint_gate_local": False,
@@ -57,6 +59,8 @@ DEFAULT_CONFIG = {
     "notify_every_call": True,
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
+    "ntfy_token": "",
+    "phone_remote_adb": True,
     "push_enabled": True,
     "watch_enabled": True,
     "alert_disk_percent": 90,
@@ -128,6 +132,7 @@ _COMMENTS = {
     "tunnel_provider": 'Public tunnel: "ngrok" (permanent URL) or "cloudflare" (quick tunnel, URL changes)',
     "ngrok_domain": 'Your free ngrok static domain, e.g. "abc-def-123.ngrok-free.app"',
     "allowed_dirs": "Folders the file tools may read and write",
+    "protected_paths": "Folders inside allowed_dirs the file tools may read but never write (ROSE's own checkout is always protected)",
     "projects_root": "Where the user's projects live (open_project finds them by name; files here open in VS Code)",
     "max_read_bytes": "read_file and content search skip files bigger than this",
     "input_enabled": "Set false to turn off mouse and keyboard control",
@@ -148,6 +153,7 @@ _COMMENTS = {
                       'needs your phone\'s fingerprint (passkey; turn on with `rose fingerprint enable`). '
                       'Unknown values act like "passphrase"'),
     "fingerprint_window_minutes": "Fingerprint mode: after a fingerprint, that client may run non-sensitive tools for this many minutes (1-10) until your phone locks",
+    "fingerprint_trusted_clients": "Fingerprint mode: clients that never need a fingerprint (default the Rose apps, \"Phone app\"); a locked phone or lost-phone mode still blocks them",
     "fingerprint_fresh_tools": "Fingerprint mode: tools that always need a fresh fingerprint (calls, messages, camera, mic)",
     "fingerprint_gate_local": "Fingerprint mode: also gate local Claude Code (Forge)",
     "fingerprint_exempt_clients": "Fingerprint mode: client labels that keep the passphrase rules instead (labels from `rose auth list`)",
@@ -156,6 +162,8 @@ _COMMENTS = {
     "approval_grant_minutes": "After you approve once, that client can act without asking again for this many minutes (0 = ask every time)",
     "ntfy_server": "Push server for phone notifications (ntfy)",
     "ntfy_topic": "Secret ntfy topic your phone subscribes to (set by `rose push setup`)",
+    "ntfy_token": "ntfy access token (self-hosted server or reserved topic) so only you can read pushes; lost-phone location is pushed only when set",
+    "phone_remote_adb": "Phone reachable off home Wi-Fi via `adb tcpip 5555` over Tailscale (adbd's port 5555 is unencrypted and listens on every phone network until reboot)",
     "push_enabled": "Send alerts to your phone",
     "watch_enabled": "Run watchers and schedules (rose-watch.service)",
     "alert_disk_percent": "Alert when the disk is this full",
@@ -220,11 +228,26 @@ def write_default_config(values: dict) -> None:
         lines.append("")
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text("\n".join(lines))
+    _private(CONFIG_PATH.parent, 0o700)
+    _private(CONFIG_PATH, 0o600)
+
+
+def _private(path: Path, mode: int) -> None:
+    """chmod if we own it; ROSE's data (typed text, screenshots, memories, job commands) is for this user only."""
+    try:
+        if path.exists() and path.stat().st_uid == os.getuid() and path.stat().st_mode & 0o777 != mode:
+            os.chmod(path, mode)
+    except OSError:
+        pass
 
 
 def _ensure() -> None:
     for d in (ROSE_HOME, SCREENSHOT_DIR, LOG_DIR, WORKSPACE_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    # A 0700 parent keeps everything inside private whatever the files' own modes (umask 002 makes them 664).
+    _private(ROSE_HOME, 0o700)
+    _private(CONFIG_PATH.parent, 0o700)
+    _private(CONFIG_PATH, 0o600)
     if CONFIG_PATH.exists():
         return
     values: dict = {}

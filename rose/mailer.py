@@ -55,9 +55,12 @@ def _send(subject: str, body: str, to: list[str]) -> None:
     msg["Message-ID"] = make_msgid(domain="rose.local")
     msg.set_content(body)
     host, port = s.get("smtp_host", "smtp.gmail.com"), int(s.get("smtp_port", 587))
-    with smtplib.SMTP(host, port, timeout=20) as smtp:
-        if s.get("starttls", True):
-            smtp.starttls(context=ssl.create_default_context())
+    ctx = ssl.create_default_context()
+    smtp_cls = (lambda: smtplib.SMTP_SSL(host, port, timeout=20, context=ctx)) if port == 465 else \
+        (lambda: smtplib.SMTP(host, port, timeout=20))
+    with smtp_cls() as smtp:
+        if port != 465:
+            smtp.starttls(context=ctx)  # always: never send the password in clear
         if s.get("password"):
             smtp.login(s["username"], s["password"])
         smtp.send_message(msg)

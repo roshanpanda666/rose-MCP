@@ -219,8 +219,16 @@ def open_path(path: str) -> str:
             root = next((d for d in p.parents if projects.in_projects(d) and projects._is_project(d)), p.parent)
             projects.open_in_code(root, p)
         return f"Opened {p} in VS Code."
+    if p.is_file() and (p.suffix.lower() in RUNNABLE_EXT or os.access(p, os.X_OK)):
+        raise ToolError(f"{p.name} is a program or launcher; ROSE won't run it with open_path. Open it yourself "
+                        "if you trust it.")
     launch_detached(["xdg-open", str(p)], name="open")
     return f"Opened {p}."
+
+
+# Files xdg-open could execute (launchers, scripts, binaries): open_path refuses them.
+RUNNABLE_EXT = {".desktop", ".sh", ".bash", ".zsh", ".run", ".appimage", ".bin", ".exe", ".msi", ".jar", ".py",
+                ".pl", ".rb", ".deb", ".rpm", ".flatpakref", ".command", ".bat", ".cmd", ".ps1"}
 
 
 PROTECTED = {"rose", "ngrok", "cloudflared", "systemd", "gnome-shell", "Xorg", "Xwayland", "pipewire",

@@ -505,8 +505,8 @@ def _to_mp3(src: bytes | Path, repeat: int = 1) -> bytes:
     args = ["ffmpeg", "-v", "error"]
     if repeat > 1:
         args += ["-stream_loop", str(repeat - 1)]
-    if isinstance(src, Path):
-        args += ["-i", str(src)]
+    if isinstance(src, Path):  # local file only: a playlist/concat file must not make ffmpeg fetch URLs
+        args += ["-protocol_whitelist", "file", "-i", str(src)]
         inp = None
     else:
         args += ["-i", "pipe:0"]
@@ -610,7 +610,8 @@ def phone_speak(text: str = "", audio_file: str = "", siren: bool = False, volum
         done.append("Siren (timer) ringing on the phone until someone dismisses it.")
     if text or audio_file:
         if audio_file:
-            path = Path(audio_file).expanduser()
+            from rose.tools import files
+            path = files._resolve(audio_file)  # inside the allowed folders only, like every other file tool
             if not path.is_file():
                 raise ToolError(f"No such audio file: {audio_file}")
             mp3 = _to_mp3(path)
@@ -697,6 +698,11 @@ def phone_lost_mode(message: str = "", siren: bool = True, confirm: bool = False
     except ToolError as e:
         report.append(f"Lock: failed ({e})")
     report.append(f"Remote erase / more: {FIND_HUB}")
-    push.push("Phone lost mode on", "\n".join(report), url=loc["maps"] if loc else FIND_HUB, priority="high")
+    # The location goes into the push only on an access-controlled ntfy topic (ntfy_token); a public topic is
+    # readable by anyone who learns its name.
+    priv = push.private_channel()
+    shown = report if priv else [r for r in report if not r.lower().startswith(("location", "📍"))]
+    push.push("Phone lost mode on", "\n".join(shown) + ("" if priv else "\nLocation: see ROSE on the laptop."),
+              url=loc["maps"] if (loc and priv) else FIND_HUB, priority="high")
     text = "Lost mode:\n" + "\n".join(report)
     return [text, image] if image else [text]

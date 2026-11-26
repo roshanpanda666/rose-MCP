@@ -55,8 +55,14 @@ def test_remote_confirm_needs_approval_then_grant(remote, auth_state):
     assert rec["status"] == "done" and "wrote b.txt" in rec["result"]
     with pytest.raises(LookupError):
         guard.approve(aid, passphrase)  # one-time
+    assert not guard.grant_active(remote)  # approving a confirm=true action opens no grant
+    gui = guard.guarded("type_text", lambda text: "typed", read_only=False)
+    assert guard.approve(gui("hi")["approval_id"], passphrase)["status"] == "done"
     assert guard.grant_active(remote)
-    assert tool("c.txt", confirm=True) == "wrote c.txt"  # grant window: no new link
+    assert gui("hi") == "typed"  # grant window: ordinary gated tools run without a new link
+    assert tool("c.txt", confirm=True)["status"] == "approval_required"  # confirm=true is never covered
+    cam = guard.guarded("webcam_capture", lambda: "photo", read_only=False)
+    assert cam()["status"] == "approval_required"  # nor is the camera
 
 
 def test_remote_gui_and_listed_tools_need_approval(remote):

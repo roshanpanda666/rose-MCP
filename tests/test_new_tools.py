@@ -47,9 +47,11 @@ def test_edit_file_and_undo(ws):
         files.edit_file(str(f), find="two", replace="2")
     with pytest.raises(ToolError, match="not found"):
         files.edit_file(str(f), find="three", replace="3")
-    undo.undoable(files.edit_file)(str(f), find="one", replace="1", append="end")
+    with pytest.raises(ToolError, match="confirm=true"):
+        files.edit_file(str(f), find="one", replace="1")
+    undo.undoable(files.edit_file)(str(f), find="one", replace="1", append="end", confirm=True)
     assert f.read_text() == "1 two two\nend"
-    files.edit_file(str(f), find="two", replace="2", replace_all=True)
+    files.edit_file(str(f), find="two", replace="2", replace_all=True, confirm=True)
     assert f.read_text() == "1 2 2\nend"
     undo.undo_last(confirm=True)
     assert f.read_text() == "one two two\n"

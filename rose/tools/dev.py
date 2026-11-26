@@ -48,7 +48,9 @@ def _resolve(project: str) -> Path:
         return Path(r["path"])
     p = Path(q).expanduser()
     if p.is_absolute() and p.is_dir():
-        return p.resolve()
+        # Only folders under the projects root: a folder anywhere else (e.g. Downloads) could carry a planted
+        # package.json/Makefile whose "tasks" are arbitrary commands.
+        return _in_root(p.resolve())
     hits = projects._match(q)
     if not hits:
         raise ToolError(f"No project like '{q}' under {projects._root()}. Use list_projects to see them all.")
@@ -67,10 +69,16 @@ def _in_root(path: Path) -> Path:
 
 # ---------- git ----------
 
+# Repo config can name programs git runs on its own (core.fsmonitor runs on `git status`). ROSE's file tools
+# can't write .git/ any more, but repos also arrive from outside (clones, downloads): never run those for reads.
+GIT_SAFE = ("-c", "core.fsmonitor=false")
+GIT_NO_HOOKS = ("-c", "core.hooksPath=/dev/null")  # hooks stay on for git_commit (the user's pre-commit checks)
+
 def _git(path: Path, *args: str, timeout: float = 20, check: bool = True) -> subprocess.CompletedProcess:
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_PAGER": "cat"}
     try:
-        proc = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=timeout,
+        proc = subprocess.run(["git", "-C", str(path), *GIT_SAFE, *(() if args[:1] == ("commit",) else GIT_NO_HOOKS),
+                               *args], capture_output=True, text=True, timeout=timeout,
                               env=env, errors="replace")
     except subprocess.TimeoutExpired:
         raise ToolError(f"git {args[0]} timed out after {timeout}s") from None

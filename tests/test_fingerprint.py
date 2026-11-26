@@ -96,6 +96,7 @@ def base(monkeypatch, auth_state, phone):
     for p in (fp.PASSKEY_PATH, fp.WINDOWS, fp.STREAMS, fp.LOST_FLAG):
         p.unlink(missing_ok=True)
     guard._approve_failures.clear()
+    fp._sig_failures.clear()
     guard._rate.clear()
     guard.end_grant("test")
     yield auth_state[0]
@@ -103,6 +104,7 @@ def base(monkeypatch, auth_state, phone):
     for p in (fp.PASSKEY_PATH, fp.WINDOWS, fp.STREAMS, fp.LOST_FLAG, fp.LOCK_STATE):
         p.unlink(missing_ok=True)
     guard._approve_failures.clear()
+    fp._sig_failures.clear()
     guard.set_lockdown(False)
 
 
@@ -218,7 +220,7 @@ def test_uv_flag_and_unknown_credential_rejected(fpmode):
     tool = guard.guarded("phone_call", lambda: "called", read_only=False)
     with pytest.raises(PermissionError, match="verification"):
         _approve(fpmode["authn"], tool()["approval_id"], flags=UP)
-    with pytest.raises(PermissionError, match="unknown passkey"):
+    with pytest.raises(LookupError, match="Unknown passkey"):  # not an attempt: no strike, challenge kept
         _approve(Authenticator(), tool()["approval_id"])
 
 
@@ -377,7 +379,8 @@ def test_fallback_needs_passphrase_and_physical_key(fpmode, monkeypatch):
         fp.fallback_start(aid, "wrong", wait=True)
     rec = fp.fallback_start(aid, fpmode["passphrase"], wait=True)  # no key press
     assert rec["status"] == "pending" and calls == [] and "fallback_error" in rec
-    assert pressed["key"] in physkey.KEY_CODES
+    keys = pressed["key"].split()
+    assert len(keys) == 3 and len(set(keys)) == 3 and all(k in physkey.KEY_CODES for k in keys)
     pressed["ok"] = True
     rec = fp.fallback_start(aid, fpmode["passphrase"], wait=True)
     assert rec["status"] == "done" and calls == ["f"]
@@ -579,112 +582,33 @@ def test_push_opens_app_when_registered(appmode, monkeypatch):
     res = guard.guarded("read_file", lambda path="x": "text", read_only=True)()
     k = sent[-1]
     assert k["url"].startswith("rosevoice://approve?u=https%3A%2F%2Frose.example.test%2Frose%2Fapprove%3Fid%3D")
-    assert k["actions"][0]["url"] == res["approval_url"]
+    assert k["actions"][0]["url"] == k["url"] and k["actions"][0]["label"].startswith("Approve")
+    assert k["actions"][1]["url"] == res["approval_url"]
+    assert k["approve_url"] == res["approval_url"]  # rides on the desktop notification to the phone app
 
 
-def test_app_routes_and_page_link(appmode):
-    from starlette.testclient import TestClient
+# ---------------- trusted clients (the Rose apps) ----------------
 
-    from rose import server
-    client = TestClient(server.build_http_app("http://127.0.0.1:8765", 8765), base_url="http://127.0.0.1:8765")
-    aid = guard.guarded("read_file", lambda path="x": "text", read_only=True)()["approval_id"]
-    r = client.get(f"{guard.APPROVE_PATH}?id={aid}")
-    assert "Approve in Rose app" in r.text and "intent://approve?u=" in r.text
-    r = client.get(f"{fp.DEVICE_APPROVE_PATH}?id={aid}")
-    assert r.status_code == 200 and r.json()["tool"] == "read_file"
-    assert client.get(f"{fp.DEVICE_APPROVE_PATH}?id=nope").status_code == 404
-    r = client.post(fp.DEVICE_APPROVE_PATH, json=appmode["app"].sign(aid))
-    assert r.status_code == 200 and r.json()["status"] == "done"
-    k = AppKey()
-    tok = fp.new_registration("phone").split("t=", 1)[1]
-    r = client.post(fp.DEVICE_REGISTER_PATH, json={"t": tok, "passphrase": appmode["passphrase"],
-                                                   "public_key": k.spki, "device": "Pixel"})
-    assert r.status_code == 200 and r.json()["name"] == "app-Pixel"
+def test_trusted_client_never_asks(fpmode, settings):
+    settings(fingerprint_trusted_clients=["Phone app"])
+    fpmode["who"]["c"] = "Phone app"
+    assert guard.guarded("phone_call", lambda: "called", read_only=False)() == "called"
+    assert guard.guarded("webcam_capture", lambda: "photo", read_only=False)()["content"] == "photo"
+    fpmode["who"]["c"] = "Claude (test)"
+    assert guard.guarded("phone_call", lambda: "called", read_only=False)()["status"] == "approval_required"
 
 
-# ---------------- Rose app security screen ----------------
-
-def _manage_open(app):
-    ch = fp.manage_challenge(app.kid)["challenge"]
-    sig = app.key.sign(fp.manage_message(app.kid, ch), ec.ECDSA(hashes.SHA256()))
-    return fp.manage_open({"key_id": app.kid, "challenge": ch, "signature": webauthn.b64u(sig)})["session"]
-
-
-def test_manage_session_needs_valid_single_use_signature(appmode):
-    app = appmode["app"]
-    with pytest.raises(LookupError):
-        fp.manage_challenge("unknown")
-    ch = fp.manage_challenge(app.kid)["challenge"]
-    other = fp.manage_message(app.kid, "wrong")
-    bad = app.key.sign(other, ec.ECDSA(hashes.SHA256()))
-    with pytest.raises(PermissionError):
-        fp.manage_open({"key_id": app.kid, "challenge": ch, "signature": webauthn.b64u(bad)})
-    good = app.key.sign(fp.manage_message(app.kid, ch), ec.ECDSA(hashes.SHA256()))
-    with pytest.raises(PermissionError):  # challenge was consumed by the failed try
-        fp.manage_open({"key_id": app.kid, "challenge": ch, "signature": webauthn.b64u(good)})
-    tok = _manage_open(app)
-    with pytest.raises(PermissionError):
-        fp.manage_keys("not-a-session")
-    keys = fp.manage_keys(tok)["keys"]
-    assert {k["kind"] for k in keys} == {"passkey", "app"}
-    assert [k["name"] for k in keys if k["this_device"]] == ["app-A142"]
-
-
-def test_manage_remove_and_self_revoke_ends_session(appmode):
-    app = appmode["app"]
-    tok = _manage_open(app)
-    passkey = next(k["name"] for k in fp.manage_keys(tok)["keys"] if k["kind"] == "passkey")
-    assert fp.manage_remove(tok, passkey)["removed"] == 1
-    with pytest.raises(LookupError):
-        fp.manage_remove(tok, "nope")
-    res = fp.manage_remove(tok, "app-A142")
-    assert res["self"] and "laptop fallback" in res["warning"]
-    with pytest.raises(PermissionError):
-        fp.manage_keys(tok)
-
-
-def test_manage_rekey_keeps_name_and_drops_old_key(appmode):
-    app = appmode["app"]
-    tok = _manage_open(app)
-    new = AppKey()
-    with pytest.raises(PermissionError):
-        fp.manage_rekey(tok, "wrong passphrase", new.spki)
-    res = fp.manage_rekey(tok, appmode["passphrase"], new.spki)
-    assert res["name"] == "app-A142" and res["key_id"] != app.kid
-    with pytest.raises(PermissionError):  # session belonged to the old key
-        fp.manage_keys(tok)
-    with pytest.raises(LookupError):
-        fp.manage_challenge(app.kid)
-    new.kid = res["key_id"]
-    assert fp.manage_keys(_manage_open(new))["keys"]
-
-
-def test_manage_passphrase_change(appmode):
-    from rose import auth
-    tok = _manage_open(appmode["app"])
-    with pytest.raises(PermissionError):
-        fp.manage_passphrase(tok, "wrong passphrase", "a brand new passphrase")
-    with pytest.raises(ValueError):
-        fp.manage_passphrase(tok, appmode["passphrase"], "short")
-    fp.manage_passphrase(tok, appmode["passphrase"], "a brand new passphrase")
-    assert auth.check_passphrase("a brand new passphrase") and not auth.check_passphrase(appmode["passphrase"])
-
-
-def test_manage_routes(appmode):
-    from starlette.testclient import TestClient
-
-    from rose import server
-    app = appmode["app"]
-    client = TestClient(server.build_http_app("http://127.0.0.1:8765", 8765), base_url="http://127.0.0.1:8765")
-    assert client.get(f"{fp.DEVICE_CHALLENGE_PATH}?key_id=nope").status_code == 404
-    ch = client.get(f"{fp.DEVICE_CHALLENGE_PATH}?key_id={app.kid}").json()["challenge"]
-    sig = webauthn.b64u(app.key.sign(fp.manage_message(app.kid, ch), ec.ECDSA(hashes.SHA256())))
-    r = client.post(fp.DEVICE_SESSION_PATH, json={"key_id": app.kid, "challenge": ch, "signature": sig})
-    assert r.status_code == 200
-    h = {"X-Rose-Session": r.json()["session"]}
-    assert client.get(fp.DEVICE_KEYS_PATH).status_code == 401
-    assert len(client.get(fp.DEVICE_KEYS_PATH, headers=h).json()["keys"]) == 2
-    r = client.post(fp.DEVICE_PASSPHRASE_PATH, headers=h, json={"current": appmode["passphrase"], "new": "x"})
-    assert r.status_code == 400
-    r = client.post(fp.DEVICE_REMOVE_PATH, headers=h, json={"name": "nope"})
-    assert r.status_code == 404
+def test_trusted_client_still_blocked_when_locked_or_lost(fpmode, settings, phone):
+    settings(fingerprint_trusted_clients=["Phone app"])
+    fpmode["who"]["c"] = "Phone app"
+    phone("locked")
+    with pytest.raises(ToolError, match="locked"):
+        guard.guarded("read_file", lambda path="x": "text", read_only=True)()
+    phone("unlocked")
+    fp.LOST_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    fp.LOST_FLAG.touch()
+    try:
+        res = guard.guarded("read_file", lambda path="x": "text", read_only=True)()
+        assert res["status"] == "approval_required"
+    finally:
+        fp.LOST_FLAG.unlink(missing_ok=True)

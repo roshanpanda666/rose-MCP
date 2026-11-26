@@ -308,7 +308,7 @@ def commits(day: Date, email: str) -> dict[str, list[str]]:
 
     def one(p: dict) -> tuple[str, list[str]]:
         try:
-            out = subprocess.run(["git", "-C", p["path"], "log", "--all", "--no-merges", f"--author={email}",
+            out = subprocess.run(["git", "-C", p["path"], "-c", "core.fsmonitor=false", "log", "--all", "--no-merges", f"--author={email}",
                                   f"--since={since}", f"--until={until}", "--format=%H%x09%s"],
                                  capture_output=True, text=True, timeout=8)
         except (OSError, subprocess.SubprocessError):

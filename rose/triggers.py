@@ -126,7 +126,11 @@ def fired(t: dict, prev: dict, cur: dict) -> str:
 # ---------------- firing ----------------
 
 def _fire(t: dict, reason: str) -> None:
+    from rose import guard
     name = t["routine"]
+    if guard.lockdown():
+        _log({"event": "trigger_skipped_lockdown", "when": t["when"], "routine": name})
+        return
     if t["ask"]:
         base = str(load_config().get("phone_app_url", DEFAULT_PHONE_URL)).rstrip("/")
         push(f"Start {name} mode?", f"{reason}. Tap to run routine '{name}'.", url=f"{base}/?do=routine:{name}",

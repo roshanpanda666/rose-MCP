@@ -17,7 +17,21 @@ const readline = require("readline");
 
 app.commandLine.appendSwitch("enable-transparent-visuals");
 
-const BASE = (process.env.ROSE_FACE_URL || "http://127.0.0.1:8790").replace(/\/+$/, "");
+
+// The app token only ever goes to a loopback backend or over https (never plain http to another host).
+function safeBase(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "https:" || (u.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname))) return url;
+  } catch {}
+  console.error(`Refusing backend URL ${url}: use http://127.0.0.1 or https`);
+  return "http://127.0.0.1:8790";
+}
+// API paths from the renderer: fixed prefix, no dot segments or encoded tricks that fetch would normalise away.
+function safePath(p, prefix) {
+  return typeof p === "string" && p.startsWith(prefix) && !/(^|\/)\.\.?(\/|$)|%2e|%2f|%5c|\\/i.test(p);
+}
+const BASE = safeBase((process.env.ROSE_FACE_URL || "http://127.0.0.1:8790").replace(/\/+$/, ""));
 const ENV_FILE = (process.env.ROSE_FACE_ENV || "~/0x/projects/rose-phone-app/backend/.env").replace(/^~/, os.homedir());
 const ASSETS = path.join(__dirname, "..", "..", "rose", "assets");
 const DESKTOP_APP = path.join(__dirname, "..", "rose-desktop");
@@ -674,7 +688,7 @@ ipcMain.handle("chat:history", async () => {
   return c;
 });
 
-ipcMain.handle("chat:media", (_e, p) => (typeof p === "string" && p.startsWith("/api/media/") ? api(p, { binary: true }) : { ok: false }));
+ipcMain.handle("chat:media", (_e, p) => (safePath(p, "/api/media/") ? api(p, { binary: true }) : { ok: false }));
 ipcMain.handle("chat:theme", () => api("/api/rose/theme"));
 ipcMain.handle("chat:new", () => { newChat(); return true; });
 ipcMain.handle("chat:hide", () => { chat?.hide(); return true; });
@@ -707,6 +721,11 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on("second-instance", () => { comeBack(); showChat(true); });
   app.whenReady().then(() => {
+  // Pages here are local files, but deny every permission they do not need (defence in depth).
+  const { session } = require("electron");
+  const ALLOWED_PERMS = ["media", "clipboard-sanitized-write"];
+  session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(ALLOWED_PERMS.includes(perm)));
+  session.defaultSession.setPermissionCheckHandler((_wc, perm) => ALLOWED_PERMS.includes(perm));
     if (fs.existsSync(ICON)) app.dock?.setIcon?.(nativeImage.createFromPath(ICON));
     createFace();
     createChat();

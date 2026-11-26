@@ -63,6 +63,8 @@ UNTRUSTED_TOOLS = {
     "explain_error", "claude_job_status", "activity_today", "standup", "list_projects",
     "phone_contacts", "phone_ui_list", "phone_notifications", "phone_status",
     "today_overview", "failure_report",
+    "clipboard_history", "screen_ocr", "find_on_screen", "screen_elements", "docker", "list_routines",
+    "list_triggers", "phone_get_files", "check_approval", "undo_history", "recording_list",
 }
 
 # Mouse/keyboard control from a remote client needs approval, because a click can press "Send"
@@ -75,7 +77,39 @@ GUI_TOOLS = {"hand_to_claude", "phone_call", "phone_message", "phone_click_text"
              "phone_connect", "phone_tap", "phone_swipe", "phone_type", "phone_key", "phone_open_app",
              "phone_volume", "phone_media", "phone_setting", "phone_screen", "phone_notifications",
              "phone_call_control", "phone_alarm", "phone_open_url", "phone_scroll",
-             "phone_speak", "phone_stop_sound", "phone_power", "phone_lost_mode"}
+             "phone_speak", "phone_stop_sound", "phone_power", "phone_lost_mode",
+             # run code or act later without the user watching
+             "project_run", "save_routine", "schedule_add",
+             # move data off the laptop
+             "send_to_phone", "forge_run"}
+
+# Never covered by an approval grant (passphrase mode) or a fingerprint window: each call needs its own approval.
+# These run code, act later unattended, move data off the laptop, or use the camera/mic.
+NO_GRANT_TOOLS = {"hand_to_claude", "project_run", "docker", "git_commit", "write_file", "edit_file", "move_file",
+                  "copy_file", "trash_file", "unzip_file", "new_project", "run_routine", "save_routine",
+                  "schedule_add", "send_to_phone", "forge_run", "forge_send", "phone_call", "phone_message",
+                  "phone_call_control", "phone_power", "power_control", "stop_process", "wifi_connect",
+                  "memory_forget", "agent_browser_open", "agent_browser_fill", "phone_open_url"}
+
+# Read-only by annotation, but they send text to outside services: blocked in lockdown like any write.
+OPEN_WORLD_READS = {"freellm_ask", "freellm_web_search", "today_overview", "github_my_prs", "github_pr_status",
+                    "github_ci_runs", "github_notifications"}
+
+
+def _url_carries_data(url: Any) -> bool:
+    """A URL with a query or fragment can carry data out (https://evil.example/?q=<secrets>)."""
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(str(url))
+    except ValueError:
+        return True
+    return bool(u.query or u.fragment or "@" in u.netloc)
+
+
+def needs_fresh(name: str, kwargs: dict) -> bool:
+    """True when a call must get its own approval even inside a grant or fingerprint window."""
+    return (name in NO_GRANT_TOOLS or name in ALWAYS_APPROVE or bool(kwargs.get("confirm"))
+            or (name == "open_url" and _url_carries_data(kwargs.get("url", ""))))
 # Approving once opens a time-limited grant for that client (approval_grant_minutes, default 60):
 # until it expires, that client's actions don't ask again. Other clients still need their own approval.
 GRANT_FILE = ROSE_HOME / "approval_grant.json"
@@ -182,10 +216,25 @@ def _mark_untrusted(name: str, result: Any, who: str) -> Any:
 
 # ---------------- approvals ----------------
 
+SUMMARY_ARG_LIMIT = 6000  # per argument; the approval page shows the action in full up to this
+
+
 def _describe(name: str, kwargs: dict) -> str:
-    shown = {k: (v if not isinstance(v, str) or len(v) < 400 else v[:400] + "…") for k, v in kwargs.items()
-             if k != "confirm"}
-    return f"{name}({', '.join(f'{k}={v!r}' for k, v in shown.items())})"
+    """What an approval will run. Arguments are shown in full; anything cut is flagged loudly, because a payload
+    hidden past the cut is exactly what an injected request would do."""
+    shown, cut = {}, []
+    for k, v in kwargs.items():
+        if k == "confirm":
+            continue
+        if isinstance(v, str) and len(v) > SUMMARY_ARG_LIMIT:
+            cut.append(f"{k}: {len(v) - SUMMARY_ARG_LIMIT} more characters NOT SHOWN")
+            v = v[:SUMMARY_ARG_LIMIT] + "…"
+        shown[k] = v
+    out = f"{name}({', '.join(f'{k}={v!r}' for k, v in shown.items())})"
+    if cut:
+        out = ("⚠️ TRUNCATED (" + "; ".join(cut) + "). Deny unless you know exactly what the hidden part is.\n"
+               + out)
+    return out
 
 
 def grant_minutes() -> int:
@@ -218,11 +267,11 @@ def end_grant(reason: str = "") -> bool:
 
 
 
-def _new_approval(name: str, kwargs: dict, who: str) -> dict:
+def _new_approval(name: str, kwargs: dict, who: str, grant: bool = True) -> dict:
     APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
     aid = secrets.token_urlsafe(18)
     summary = _describe(name, kwargs)
-    mins = grant_minutes()
+    mins = grant_minutes() if grant else 0
     if mins:
         summary += f" (approving also lets {who} act without asking again for {mins} minutes)"
     rec = {"id": aid, "tool": name, "args": kwargs, "caller": who, "created": time.time(), "status": "pending",
@@ -356,7 +405,7 @@ def guarded(name: str, fn: Callable, read_only: bool) -> Callable:
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         who = caller()
-        if lockdown() and not read_only and name != "check_approval":
+        if lockdown() and (not read_only or name in OPEN_WORLD_READS) and name != "check_approval":
             raise ToolError("ROSE is in LOCKDOWN (read-only). The user must turn it off on the laptop: "
                             "`rose lockdown off` or the dashboard.")
         if is_remote(who):  # runaway-loop brake for remote clients (local Claude Code has its own limits)
@@ -381,7 +430,7 @@ def guarded(name: str, fn: Callable, read_only: bool) -> Callable:
             if fingerprint.applies_to(who, is_remote(who)):
                 bound = {k: v for k, v in inspect.signature(fn).bind_partial(*args, **kwargs).arguments.items()
                          if k != "confirm"}
-                parked = fingerprint.gate(name, bound, who)
+                parked = fingerprint.gate(name, bound, who, fresh=needs_fresh(name, {**bound, **kwargs}))
                 if parked is not None:
                     return parked
                 try:
@@ -394,16 +443,17 @@ def guarded(name: str, fn: Callable, read_only: bool) -> Callable:
                     result = _mark_untrusted(name, result, who)
                 return result
             mode = "passphrase"  # exempt clients keep today's passphrase rules
-        if (is_remote(who) and mode == "passphrase"
-                and not grant_active(who)):
+        if is_remote(who) and mode == "passphrase":
             bound = {k: v for k, v in inspect.signature(fn).bind_partial(*args, **kwargs).arguments.items()
                      if k != "confirm"}
-            if has_confirm and kwargs.get("confirm"):
-                return _new_approval(name, bound, who)
-            if name in set(cfg.get("approval_required_tools", ["webcam_capture"])) | ALWAYS_APPROVE:
-                return _new_approval(name, bound, who)
-            if name in GUI_TOOLS:
-                return _new_approval(name, bound, who)
+            fresh = needs_fresh(name, {**bound, **kwargs})
+            if fresh or not grant_active(who):  # a grant never covers fresh-only calls
+                if has_confirm and kwargs.get("confirm"):
+                    return _new_approval(name, bound, who, grant=not fresh)
+                if name in set(cfg.get("approval_required_tools", ["webcam_capture"])) | ALWAYS_APPROVE:
+                    return _new_approval(name, bound, who, grant=not fresh)
+                if name in GUI_TOOLS or (name == "open_url" and fresh):
+                    return _new_approval(name, bound, who, grant=not fresh)
         result = fn(*args, **kwargs)
         if name in UNTRUSTED_TOOLS:
             result = _mark_untrusted(name, result, who)

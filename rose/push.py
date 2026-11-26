@@ -20,11 +20,19 @@ def settings() -> tuple[str, str]:
     return cfg.get("ntfy_server", "https://ntfy.sh").rstrip("/"), cfg.get("ntfy_topic", "")
 
 
+def private_channel() -> bool:
+    """True when pushes need a credential to read (ntfy_token set, i.e. an access-controlled topic). Sensitive
+    extras (lost-phone location) are only pushed then; on a public topic, anyone with its name can read them."""
+    return bool(load_config().get("ntfy_token"))
+
+
 def push(title: str, message: str = "", url: str | None = None, priority: str = "default",
-         tags: str = "", desktop: bool = True, actions: list[dict] | None = None) -> bool:
-    """Send a phone push (if set up) and a desktop notification. Never raises; returns True if pushed."""
+         tags: str = "", desktop: bool = True, actions: list[dict] | None = None, approve_url: str = "") -> bool:
+    """Send a phone push (if set up) and a desktop notification. Never raises; returns True if pushed.
+    approve_url: a ROSE approval page; the desktop notification carries it so the phone app's own push can
+    open the fingerprint prompt even when ntfy is off or rate-limited."""
     if desktop:
-        notify_desktop(title, message)
+        notify_desktop(title, message, approve_url=approve_url)
     server, topic = settings()
     if not topic or not load_config().get("push_enabled", True):
         return False
@@ -39,10 +47,13 @@ def push(title: str, message: str = "", url: str | None = None, priority: str = 
         if url:
             body["click"] = url
             body["actions"] = [{"action": "view", "label": "Open", "url": url, "clear": True}]
-        if actions:  # ntfy allows 3 buttons
-            body["actions"] = (actions + body.get("actions", []))[:3]
+        if actions:  # ntfy allows 3 buttons; skip the default "Open" when a button already opens that link
+            extra = [b for b in body.get("actions", []) if all(b["url"] != x.get("url") for x in actions)]
+            body["actions"] = (actions + extra)[:3]
         try:
-            r = httpx.post(server, json=body, timeout=10)
+            token = load_config().get("ntfy_token") or ""  # ntfy access token (self-hosted or reserved topic)
+            r = httpx.post(server, json=body, timeout=10,
+                           headers={"Authorization": f"Bearer {token}"} if token else None)
             _log({"event": "push_sent" if r.status_code < 300 else "push_failed", "title": title[:80],
                   "status": r.status_code})
         except Exception as e:

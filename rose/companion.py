@@ -130,6 +130,16 @@ ERROR = re.compile(r"\berror\b|failed|exception|traceback|crash", re.I)
 
 # ---------------------------------------------------------------- screen context (worker thread)
 
+def _open_approval(url: str) -> None:
+    """Open an approval link from the rose-phone backend, but only a ROSE approval page on ROSE's own URL."""
+    from urllib.parse import urlparse
+    from rose.config import get_public_url
+    u, own = urlparse(url or ""), urlparse(get_public_url() or "")
+    local = u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost")
+    if (u.scheme == "https" and u.netloc == own.netloc or local) and u.path.startswith("/rose/approve"):
+        webbrowser.open(url)
+
+
 def _out(cmd: list[str], timeout: float = 2) -> str:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout.strip()
@@ -1201,7 +1211,7 @@ class ChatBox(tk.Toplevel):
 
         self.approve = tk.Label(self, text="Approve in browser →", bg=ACCENT, fg="white",
                                 font=("DejaVu Sans", 9, "bold"), cursor="hand2", pady=4)
-        self.approve.bind("<Button-1>", lambda e: webbrowser.open(self.app.approval))
+        self.approve.bind("<Button-1>", lambda e: _open_approval(self.app.approval))
 
         self.row = tk.Frame(self, bg=FIELD)
         self.row.pack(fill="x", padx=12, pady=10)

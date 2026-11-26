@@ -84,7 +84,7 @@ def _before(tool: str, kw: dict) -> dict | None:
     if tool == "write_file":
         from rose.tools import files
 
-        p = files._resolve(kw["path"])
+        p = files._resolve(kw["path"], write=True)
         if p.exists() and p.is_file():
             UNDO_DIR.mkdir(parents=True, exist_ok=True)
             backup = UNDO_DIR / f"{uuid.uuid4().hex[:10]}.bak"
@@ -264,7 +264,7 @@ def _reverse(u: dict) -> str:
         p = Path(u["path"])
         if not p.is_dir():
             return f"{p.name} is already gone"
-        if subprocess.run(["git", "-C", str(p), "rev-parse", "--verify", "-q", "HEAD"],
+        if subprocess.run(["git", "-C", str(p), "-c", "core.fsmonitor=false", "rev-parse", "--verify", "-q", "HEAD"],
                           capture_output=True).returncode == 0:
             raise ToolError(f"{p.name} has commits now; ROSE won't delete it.")
         extra = [f.name for f in p.iterdir() if f.name not in (".git", "README.md", ".gitignore")]
@@ -298,7 +298,7 @@ def _reverse(u: dict) -> str:
         import subprocess
 
         def g(*a):
-            return subprocess.run(["git", "-C", u["repo"], *a], capture_output=True, text=True)
+            return subprocess.run(["git", "-C", u["repo"], "-c", "core.fsmonitor=false", *a], capture_output=True, text=True)
 
         r = g("switch", u["branch"])
         if r.returncode != 0:

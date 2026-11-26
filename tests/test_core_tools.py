@@ -28,13 +28,15 @@ def test_resolve_refuses_outside_allowlist(workspace, tmp_path):
 
 
 def test_write_read_move(workspace):
-    assert "Wrote" in files.write_file("t/a.txt", "hello world")
+    with pytest.raises(ToolError, match="confirm=true"):
+        files.write_file("t/a.txt", "hello world")
+    assert "Wrote" in files.write_file("t/a.txt", "hello world", confirm=True)
     with pytest.raises(ToolError, match="overwrite=true and confirm=true"):
         files.write_file("t/a.txt", "again")
     files.write_file("t/a.txt", "replaced", overwrite=True, confirm=True)
     assert files.read_file("t/a.txt") == "replaced"
     assert files.read_file("t/a.txt", offset=3) == "laced"
-    files.write_file("t/b.txt", "b")
+    files.write_file("t/b.txt", "b", confirm=True)
     with pytest.raises(ToolError, match="confirm=true"):
         files.move_file("t/a.txt", "t/b.txt")
     files.move_file("t/a.txt", "t/b.txt", confirm=True)

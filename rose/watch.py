@@ -154,7 +154,11 @@ def _report_text() -> tuple[str, str]:
 
 
 def _run_schedule(item: dict) -> None:
+    from rose import guard
     from rose.tools.bridge import post_as
+    if guard.lockdown() and item.get("kind") != "remind":  # lockdown stops unattended actions too
+        _log({"event": "schedule_skipped_lockdown", "kind": item.get("kind")})
+        return
     try:
         if item["kind"] == "remind":
             push("⏰ Reminder", item["text"], priority="high", tags="alarm_clock")

@@ -57,8 +57,25 @@ def _log(entry: dict) -> None:
     """Append one JSON line to today's log (~/rose/logs/YYYY-MM-DD.jsonl)."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     path = LOG_DIR / f"{datetime.now():%Y-%m-%d}.jsonl"
-    with path.open("a") as f:
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a") as f:
         f.write(json.dumps(entry, default=str) + "\n")
+
+
+# Never written to the call log in clear: typed/filled text, file contents, messages, codes. The log keeps the
+# length and a short hash (enough to tell calls apart), so a password typed into a field doesn't sit on disk.
+REDACT_ARGS = {"text", "content", "find", "replace", "append", "value", "pairing_code", "password", "passphrase",
+               "message", "body", "code", "secret", "token"}
+# Tools whose results are outside content (files, clipboard, pages, notifications): log only the size.
+REDACT_RESULTS = {"read_file", "clipboard_read", "clipboard_history", "browser_read", "ui_read", "ui_list",
+                  "agent_browser_read", "agent_browser_snapshot", "screen_ocr", "phone_notifications",
+                  "memory_search", "memory_list", "bridge_read", "today_overview", "phone_ui_list",
+                  "phone_contacts", "forge_status", "check_approval"}
+
+
+def _redacted(value: Any) -> str:
+    import hashlib
+    s = value if isinstance(value, str) else repr(value)
+    return f"<redacted {len(s)} chars #{hashlib.sha256(s.encode(errors='replace')).hexdigest()[:8]}>"
 
 
 def _short(value: Any, limit: int = 300) -> str:
@@ -97,11 +114,12 @@ def logged(fn: Callable) -> Callable:
             "caller": who,
             "tool": fn.__name__,
             **({"kind": KIND[fn.__name__]} if fn.__name__ in KIND else {}),
-            "args": {k: _short(v) for k, v in bound.arguments.items()},
+            "args": {k: (_redacted(v) if k in REDACT_ARGS and v not in ("", None) else _short(v))
+                     for k, v in bound.arguments.items()},
         }
         try:
             result = fn(*args, **kwargs)
-            entry.update(ok=True, result=_short(result))
+            entry.update(ok=True, result=_redacted(result) if fn.__name__ in REDACT_RESULTS else _short(result))
             return result
         except Exception as e:
             entry.update(ok=False, error=f"{type(e).__name__}: {e}")
@@ -171,12 +189,14 @@ def run_text(cmd: list[str], timeout: float = 10) -> str:
     return run(cmd, timeout=timeout).decode(errors="replace").strip()
 
 
-def notify_desktop(title: str, body: str = "", urgency: str = "normal") -> None:
-    """Best-effort desktop notification (never raises)."""
+def notify_desktop(title: str, body: str = "", urgency: str = "normal", approve_url: str = "") -> None:
+    """Best-effort desktop notification (never raises). approve_url rides along as the x-rose-approve hint:
+    the phone app's notification mirror turns it into an "Approve with fingerprint" push (no ntfy needed)."""
     if not shutil.which("notify-send"):
         return
+    hint = [f"--hint=string:x-rose-approve:{approve_url}"] if approve_url.startswith("https://") else []
     with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(["notify-send", "--app-name=ROSE", f"--urgency={urgency}", title, body[:200]],
+        subprocess.run(["notify-send", "--app-name=ROSE", f"--urgency={urgency}", *hint, title, body[:200]],
                        env=display_env(), capture_output=True, timeout=5)
 
 

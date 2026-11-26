@@ -52,6 +52,9 @@ DEFAULTS = {
 
 def open_web_app(url: str) -> str:
     """A site in its own app window of the user's signed-in Brave (like the installed web apps)."""
+    from urllib.parse import urlparse
+    if urlparse(url).scheme not in ("http", "https"):
+        raise ToolError(f"Only http(s) web apps can be opened, not {url[:60]!r}.")
     exe = shutil.which("brave-browser") or "/opt/brave.com/brave/brave-browser"
     launch_detached([exe, "--profile-directory=Default", "--force-renderer-accessibility", f"--app={url}"],
                     name="brave-app")

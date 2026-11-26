@@ -61,7 +61,7 @@ def phone_get_files(source: Literal["camera", "screenshots", "downloads"] = "cam
              and "No such file" not in n][:count * 3]
     if not names:
         raise ToolError(f"No files in the phone's {source} folder.")
-    dest = files._resolve(destination)
+    dest = files._resolve(destination, write=True)
     dest.mkdir(parents=True, exist_ok=True)
     got: list[Path] = []
     for name in names:

@@ -40,7 +40,7 @@ def test_overwrite_restore_needs_confirm(ws):
 
 
 def test_new_file_is_removed_on_undo(ws):
-    undo.undoable(files.write_file)(str(ws / "fresh.txt"), "x")
+    undo.undoable(files.write_file)(str(ws / "fresh.txt"), "x", confirm=True)
     undo.undo_last(confirm=True)
     assert not (ws / "fresh.txt").exists()
 

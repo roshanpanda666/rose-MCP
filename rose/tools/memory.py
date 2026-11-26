@@ -121,6 +121,14 @@ def _search(con: sqlite3.Connection, has_fts: bool, query: str, limit: int, kind
 def memory_save(text: str, tags: str = "", kind: Kind = "fact") -> dict:
     """Remember something about the user for later chats (a preference, fact, project or task). Near-identical
     memories are updated, not duplicated. tags: comma-separated words."""
+    # 'core' memories go into ROSE's instructions for every future chat, so a tool call (possibly steered by
+    # injected content) can't create or rewrite them: only `rose memory core` on the laptop can.
+    tags = ",".join(t for t in _clean_tags(tags).split(",") if t and t != CORE_TAG)
+    return save(text, tags, kind)
+
+
+def save(text: str, tags: str = "", kind: str = "fact", allow_core: bool = False) -> dict:
+    """memory_save without the tool rules; allow_core=True (laptop CLI only) may set or rewrite core memories."""
     text = _clean(text, MAX_TEXT)
     if not _norm(text):
         raise ToolError("Nothing to remember: text is empty.")
@@ -137,6 +145,9 @@ def memory_save(text: str, tags: str = "", kind: Kind = "fact") -> dict:
                     same = r
                     break
         if same is not None:
+            if not allow_core and CORE_TAG in same["tags"].split(","):
+                raise ToolError("That matches a core memory, which only changes from the laptop "
+                                "(`rose memory core`). Save it with different wording if it's a new fact.")
             merged = _clean_tags(",".join(filter(None, [same["tags"], tags])))
             con.execute("UPDATE memories SET text = ?, tags = ?, kind = ?, norm = ?, updated = ? WHERE id = ?",
                         (text, merged, kind, norm, now, same["id"]))
@@ -194,8 +205,11 @@ def core_context(max_chars: int = 3500) -> str:
                                (f"%,{CORE_TAG},%",)).fetchall()
     except Exception:
         return ""
+    from rose import guard
     lines, used = [], 0
     for r in sorted(rows, key=lambda r: KIND_ORDER.get(r["kind"], 9)):
+        if guard.scan(r["text"]):  # instruction-like text never goes into the server instructions
+            continue
         line = "- " + r["text"]
         if used + len(line) > max_chars:
             break

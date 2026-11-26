@@ -374,6 +374,20 @@ def cmd_lockdown(args) -> int:
     return 0
 
 
+def cmd_memory(args) -> int:
+    """Core memories (put into ROSE's instructions for every chat) can only be set here, on the laptop."""
+    from rose.tools import memory
+    if args.action == "core":
+        if not args.text:
+            print("Usage: rose memory core \"<fact about you>\" [--kind fact|preference|project|task]")
+            return 1
+        res = memory.save(args.text, f"{memory.CORE_TAG},{args.tags}", args.kind, allow_core=True)
+        print(f"Core memory {res['saved']}: {res['text']}")
+    else:
+        print(memory.core_context() or "No core memories.")
+    return 0
+
+
 def cmd_grant(args) -> int:
     import time
     from rose import guard
@@ -517,6 +531,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("lockdown", help="make ROSE read-only for everyone: on | off | status")
     p.add_argument("state", choices=["on", "off", "status"], nargs="?", default="status")
     p.set_defaults(fn=cmd_lockdown)
+    p = sub.add_parser("memory", help="core memories (in every chat's instructions): list | core \"<text>\"")
+    p.add_argument("action", choices=["list", "core"], nargs="?", default="list")
+    p.add_argument("text", nargs="?", default="")
+    p.add_argument("--tags", default="")
+    p.add_argument("--kind", default="fact", choices=["fact", "preference", "project", "task"])
+    p.set_defaults(fn=cmd_memory)
     p = sub.add_parser("grant", help="show or end the approved-for-an-hour window: status | end")
     p.add_argument("action", choices=["status", "end"], nargs="?", default="status")
     p.set_defaults(fn=cmd_grant)

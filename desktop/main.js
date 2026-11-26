@@ -130,6 +130,11 @@ if (!app.requestSingleInstanceLock()) {
     show(g ? g.slice(10) : undefined);
   });
   app.whenReady().then(() => {
+  // Pages here are local files, but deny every permission they do not need (defence in depth).
+  const { session } = require("electron");
+  const ALLOWED_PERMS = ["clipboard-sanitized-write"];
+  session.defaultSession.setPermissionRequestHandler((_wc, perm, cb) => cb(ALLOWED_PERMS.includes(perm)));
+  session.defaultSession.setPermissionCheckHandler((_wc, perm) => ALLOWED_PERMS.includes(perm));
     startBackend();
     createWindow();
     createTray();

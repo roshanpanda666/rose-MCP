@@ -33,19 +33,20 @@ SESSION_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 
 JOBS_DIR = ROSE_HOME / "claude_jobs"
 JOB_ID_RE = re.compile(r"^[a-z0-9]{10}$")
-# Background jobs: edits inside the project are auto-accepted; Bash only for read-only git and tests.
-# Anything else needing permission is denied (headless runs can't ask). No web tools, no MCP servers.
+# Background jobs: edits inside the project are auto-accepted; Bash only for read-only git.
+# No test runners: a job that can edit files AND run `npm test`/pytest can run any code (edit the "test" script
+# or conftest.py, then run it), with nobody watching. Anything else needing permission is denied (headless runs
+# can't ask). No web tools, no MCP servers.
 JOB_TOOLS = "Read,Edit,Write,Glob,Grep,Bash"
 JOB_ALLOWED = ["Read", "Edit", "Write", "Glob", "Grep",
-               *(f"Bash({c}:*)" for c in ("git status", "git diff", "git log", "git show", "git branch",
-                                          "uv run pytest", "pytest", "python -m pytest", "npm test", "npm run test",
-                                          "pnpm test", "yarn test", "cargo test", "go test"))]
+               *(f"Bash({c}:*)" for c in ("git status", "git diff", "git log", "git show", "git branch"))]
 JOB_DENY = ["WebFetch", "WebSearch", "mcp__rose", *(f"Bash({c}:*)" for c in (
-    "git push", "git commit", "git reset", "git checkout", "git clean", "rm", "curl", "wget", "ssh", "scp", "sudo"))]
+    "git push", "git commit", "git reset", "git checkout", "git clean", "git diff --output", "git diff --ext-diff",
+    "git log --output", "git show --output", "rm", "curl", "wget", "ssh", "scp", "sudo"))]
 JOB_SYSTEM = ("You are Claude Code running headless in the background, started by ROSE from the user's phone. "
               "Nobody can answer questions or approve anything: do what you can with the allowed tools and say "
-              "clearly what is left. You can edit files in this project and run read-only git and test commands; "
-              "never commit, push or delete. Your final answer is read on a phone: lead with the outcome, be brief.")
+              "clearly what is left. You can edit files in this project and run read-only git commands (not tests: "
+              "say which tests the user should run); never commit, push or delete. Your final answer is read on a phone: lead with the outcome, be brief.")
 
 
 def _vscode_windows() -> list[dict]:
