@@ -123,6 +123,19 @@ def check_passphrase(p: str) -> bool:
     return hmac.compare_digest(candidate, stored["hash"])
 
 
+MIN_PASSPHRASE = 12
+
+
+def set_passphrase(new: str) -> None:
+    """Replace the ROSE passphrase (callers check the old one first). Same rules as `set-passphrase`."""
+    if not isinstance(new, str) or len(new) < MIN_PASSPHRASE:
+        raise ValueError(f"The new passphrase must be at least {MIN_PASSPHRASE} characters.")
+    with _lock:
+        s = load_state()
+        s["passphrase"] = _hash_passphrase(new)
+        save_state(s)
+
+
 def auth_configured() -> bool:
     s = load_state()
     return bool(s["passphrase"]) or bool(s["static_tokens"])

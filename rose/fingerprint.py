@@ -48,6 +48,16 @@ FALLBACK_PATH = "/rose/approve/fallback"
 REGISTER_PATH = "/rose/passkey/register"
 DEVICE_REGISTER_PATH = "/rose/device/register"
 DEVICE_APPROVE_PATH = "/rose/approve/device"
+# Rose app security screen: one fingerprint opens a short management session (list/revoke keys, re-key, passphrase).
+DEVICE_CHALLENGE_PATH = "/rose/device/challenge"
+DEVICE_SESSION_PATH = "/rose/device/session"
+DEVICE_KEYS_PATH = "/rose/device/keys"
+DEVICE_REMOVE_PATH = "/rose/device/keys/remove"
+DEVICE_REKEY_PATH = "/rose/device/rekey"
+DEVICE_PASSPHRASE_PATH = "/rose/device/passphrase"
+MANAGE_MSG = "ROSE-MANAGE-v1"
+MANAGE_CHALLENGE_TTL = 120
+MANAGE_SESSION_TTL = 300
 APP_SCHEME = "rosevoice"  # the Rose Voice phone app (dev.rose.voice) opens rosevoice://approve and ://register
 APP_PACKAGE = "dev.rose.voice"
 DEVICE_MSG = "ROSE-APPROVE-v1"
@@ -763,6 +773,161 @@ def approve_device(aid: str, data: dict) -> dict:
     return _approved(aid, key["name"], "Rose app fingerprint")
 
 
+# ---------------- Rose app security screen (management session) ----------------
+#
+# The app asks for a challenge for its key id, signs ROSE-MANAGE-v1\n<key_id>\n<challenge>\n<origin> with its
+# fingerprint-locked Keystore key, and gets a session token valid MANAGE_SESSION_TTL seconds. The session can list
+# and revoke keys; re-keying and changing the passphrase also need the current ROSE passphrase. Everything is
+# logged and pushed to the phone. Challenges and sessions live in memory only (a restart ends them).
+
+_manage_lock = threading.Lock()
+_manage_challenges: dict[str, tuple[str, float]] = {}  # key_id -> (challenge, expires)
+_manage_sessions: dict[str, dict] = {}  # sha256(token) -> {"kid", "until"}
+
+
+def manage_message(kid: str, challenge: str) -> bytes:
+    return f"{MANAGE_MSG}\n{kid}\n{challenge}\n{rp()[1]}".encode()
+
+
+def manage_challenge(kid: str) -> dict:
+    """A single-use challenge for a registered app key (unknown ids get nothing, so memory stays bounded)."""
+    if not isinstance(kid, str) or kid not in _passkeys()["device_keys"]:
+        raise LookupError("This app isn't registered with ROSE (register it again).")
+    ch = webauthn.b64u(secrets.token_bytes(32))
+    with _manage_lock:
+        _manage_challenges[kid] = (ch, time.time() + MANAGE_CHALLENGE_TTL)
+    return {"challenge": ch, "origin": rp()[1], "expires_in": MANAGE_CHALLENGE_TTL}
+
+
+def manage_open(data: dict) -> dict:
+    """Verify the fingerprint signature over the challenge; returns a short-lived session token."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    _lockout_check()
+    kid = data.get("key_id", "")
+    kid = kid if isinstance(kid, str) else ""
+    with _manage_lock:
+        ch, until = _manage_challenges.pop(kid, ("", 0.0))  # single use, whatever happens
+    try:
+        key = _passkeys()["device_keys"].get(kid)
+        if not key:
+            raise webauthn.WebAuthnError("unknown app key (register the app again)")
+        got = data.get("challenge", "")
+        if not ch or until < time.time() or not isinstance(got, str) or not secrets.compare_digest(got, ch):
+            raise webauthn.WebAuthnError("challenge expired or mismatched (try again)")
+        _, pub = _load_p256(key["spki"])
+        try:
+            pub.verify(webauthn.b64u_dec(data.get("signature", "")), manage_message(kid, ch),
+                       ec.ECDSA(hashes.SHA256()))
+        except InvalidSignature:
+            raise webauthn.WebAuthnError("signature does not verify") from None
+    except (webauthn.WebAuthnError, PermissionError, ValueError) as err:
+        _fail()
+        _event("manage_failed", who="rose-app", reason=str(err))
+        _notify_push("⚠️ ROSE: security screen check failed", "A Rose app fingerprint check failed.", "high", "warning")
+        raise PermissionError(f"Fingerprint check failed: {err}") from None
+    tok = secrets.token_urlsafe(32)
+    now = time.time()
+    with _manage_lock:
+        for h in [h for h, v in _manage_sessions.items() if v["until"] < now]:
+            del _manage_sessions[h]
+        _manage_sessions[_hash(tok)] = {"kid": kid, "until": now + MANAGE_SESSION_TTL}
+    _event("manage_opened", who="rose-app", name=key["name"])
+    return {"session": tok, "name": key["name"], "expires_in": MANAGE_SESSION_TTL}
+
+
+def _manage_session(tok: str) -> str:
+    """The key id behind a live session token, or PermissionError."""
+    with _manage_lock:
+        s = _manage_sessions.get(_hash(tok or ""))
+        if not s or s["until"] < time.time():
+            raise PermissionError("Session expired. Unlock again with your fingerprint.")
+        kid = s["kid"]
+    if kid not in _passkeys()["device_keys"]:
+        _end_manage_sessions(kid)
+        raise PermissionError("This app's key was revoked.")
+    return kid
+
+
+def _end_manage_sessions(kid: str) -> None:
+    with _manage_lock:
+        for h in [h for h, v in _manage_sessions.items() if v["kid"] == kid]:
+            del _manage_sessions[h]
+
+
+def manage_keys(tok: str) -> dict:
+    """Every key that can approve ROSE actions, plus the approval settings the app shows."""
+    kid = _manage_session(tok)
+    s = _passkeys()
+    keys = [{"name": c["name"], "kind": "passkey", "created": c.get("created"), "last_used": c.get("last_used"),
+             "this_device": False} for c in s["credentials"].values()]
+    keys += [{"name": k["name"], "kind": "app", "device": k.get("device", ""), "created": k.get("created"),
+              "last_used": k.get("last_used"), "this_device": i == kid} for i, k in s["device_keys"].items()]
+    return {"keys": keys, "mode": mode(), "lost_mode": lost_armed(), "window_minutes": window_minutes(),
+            "kinds": [{"kind": "app", "label": "Rose app fingerprint (Android Keystore, signs per use)"},
+                      {"kind": "passkey", "label": "Passkey (WebAuthn, browser prompt)"}]}
+
+
+def manage_remove(tok: str, name: str) -> dict:
+    kid = _manage_session(tok)
+    if not isinstance(name, str) or not name:
+        raise LookupError("No key name given.")
+    own = _passkeys()["device_keys"].get(kid, {}).get("name") == name
+    n = remove_passkey(name)
+    if not n:
+        raise LookupError(f"No key named {name}.")
+    if own:
+        _end_manage_sessions(kid)
+    _notify_push("🔑 ROSE key revoked", f"'{name}' can no longer approve ROSE actions (revoked from the Rose app).",
+                 "high", "key")
+    left = len(list_passkeys()) + len(list_device_keys())
+    warn = "Fingerprint mode is on but no key is left: only the laptop fallback can approve." \
+        if enabled() and not left else ""
+    return {"removed": n, "self": own, "warning": warn}
+
+
+def manage_rekey(tok: str, passphrase: str, public_key: str) -> dict:
+    """Swap this app's key for a new one (keeps its name). Needs the session and the ROSE passphrase."""
+    from rose import auth
+    _lockout_check()
+    kid = _manage_session(tok)
+    der, _ = _load_p256(public_key)
+    if not auth.check_passphrase(passphrase):
+        _fail()
+        _event("rekey_wrong_passphrase", who="rose-app")
+        raise PermissionError("Wrong passphrase.")
+    new_kid = webauthn.b64u(hashlib.sha256(der).digest())[:22]
+    with _file_lock:
+        s = _passkeys()
+        old = s["device_keys"].pop(kid, None)
+        if not old:
+            raise PermissionError("This app's key was revoked.")
+        s["device_keys"][new_kid] = {**old, "spki": webauthn.b64u(der), "created": int(time.time()), "last_used": None}
+        _save_passkeys(s)
+    _end_manage_sessions(kid)
+    _event("app_key_rekeyed", who="rose-app", name=old["name"])
+    _notify_push("🔑 ROSE app key changed", f"The Rose app key '{old['name']}' was replaced with a new one.", "high", "key")
+    return {"name": old["name"], "key_id": new_kid}
+
+
+def manage_passphrase(tok: str, current: str, new: str) -> dict:
+    from rose import auth
+    _lockout_check()
+    _manage_session(tok)
+    if not auth.check_passphrase(current):
+        _fail()
+        _event("passphrase_change_wrong", who="rose-app")
+        raise PermissionError("Wrong current passphrase.")
+    if new == current:
+        raise ValueError("The new passphrase is the same as the old one.")
+    auth.set_passphrase(new)
+    _event("passphrase_changed", who="rose-app")
+    _notify_push("🔐 ROSE passphrase changed", "Changed from the Rose app. If this wasn't you: rose auth set-passphrase "
+                 "on the laptop.", "high", "key")
+    return {"message": "Passphrase changed."}
+
+
 # ---------------- laptop fallback (dead or lost phone) ----------------
 
 _fallback_threads: dict[str, threading.Thread] = {}
@@ -1066,6 +1231,63 @@ def add_routes(mcp) -> None:
         except PermissionError as e:
             return json_resp({"message": str(e)}, 401)
         return json_resp({"message": f"Registered as '{res['name']}'.", **res})
+
+    # ---- Rose app security screen (X-Rose-Session header carries the management session) ----
+
+    def session_of(request: Request) -> str:
+        return request.headers.get("x-rose-session", "")
+
+    async def manage_call(fn, *args):
+        try:
+            return json_resp(await run_in_threadpool(fn, *args))
+        except LookupError as e:
+            return json_resp({"message": str(e)}, 404)
+        except PermissionError as e:
+            return json_resp({"message": str(e)}, 401)
+        except ValueError as e:
+            return json_resp({"message": str(e)}, 400)
+
+    @mcp.custom_route(DEVICE_CHALLENGE_PATH, methods=["GET"], include_in_schema=False)
+    async def manage_challenge_get(request: Request):
+        return await manage_call(manage_challenge, request.query_params.get("key_id", ""))
+
+    @mcp.custom_route(DEVICE_SESSION_PATH, methods=["POST"], include_in_schema=False)
+    async def manage_session_post(request: Request):
+        try:
+            data = await body_json(request)
+        except ValueError:
+            return json_resp({"message": "Bad request."}, 400)
+        return await manage_call(manage_open, data)
+
+    @mcp.custom_route(DEVICE_KEYS_PATH, methods=["GET"], include_in_schema=False)
+    async def manage_keys_get(request: Request):
+        return await manage_call(manage_keys, session_of(request))
+
+    @mcp.custom_route(DEVICE_REMOVE_PATH, methods=["POST"], include_in_schema=False)
+    async def manage_remove_post(request: Request):
+        try:
+            data = await body_json(request)
+        except ValueError:
+            return json_resp({"message": "Bad request."}, 400)
+        return await manage_call(manage_remove, session_of(request), str(data.get("name", ""))[:60])
+
+    @mcp.custom_route(DEVICE_REKEY_PATH, methods=["POST"], include_in_schema=False)
+    async def manage_rekey_post(request: Request):
+        try:
+            data = await body_json(request)
+        except ValueError:
+            return json_resp({"message": "Bad request."}, 400)
+        return await manage_call(manage_rekey, session_of(request), str(data.get("passphrase", "")),
+                                 str(data.get("public_key", "")))
+
+    @mcp.custom_route(DEVICE_PASSPHRASE_PATH, methods=["POST"], include_in_schema=False)
+    async def manage_passphrase_post(request: Request):
+        try:
+            data = await body_json(request)
+        except ValueError:
+            return json_resp({"message": "Bad request."}, 400)
+        return await manage_call(manage_passphrase, session_of(request), str(data.get("current", "")),
+                                 str(data.get("new", ""))[:256])
 
     @mcp.custom_route(REGISTER_PATH, methods=["GET"], include_in_schema=False)
     async def register_get(request: Request):
