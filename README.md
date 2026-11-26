@@ -168,6 +168,28 @@ rose install-desktop --no-autostart                    # keep the app-menu entry
 
 Only one dashboard opens at a time. Launching it again while it's open does nothing.
 
+## Closing ROSE keeps her running
+
+Closing a ROSE window never quits ROSE: she goes to the background and keeps listening.
+
+- **ROSE Desktop**: the window hides (backend, phone link and watchers keep running) and the first time you
+  close it a notification says so. Reopen it from the tray icon, or by starting ROSE again. Only
+  *Quit ROSE Desktop* in the tray menu really closes the app — and even then the MCP server keeps serving,
+  because it is its own service (`rose.service`).
+- **Rose's face** (`rose face`): closing her window, or *Hide Rose (keeps listening)* in her menu, hides the
+  face and chat. The host process stays: the "Hey Rose" wake word, the talk hotkey and push-to-talk still
+  run, and any of them brings her straight back, as does `rose face` or the dashboard's *Show Rose*. Use
+  *Quit Rose (stops listening)*, the dashboard's *Stop* button or `rose face --stop` to stop her for real.
+- `rose face --hide` puts a running Rose in the background from a script or shortcut; the choice is kept in
+  `~/rose/companion.json` (`hidden`), and the dashboard's Rose tab shows "listening in the background".
+- **Her ears stay open** (`rose/wake.py`, `MicStream`): the mic is held open for as long as she runs,
+  background or not. Pausing her (while she talks, or while you hold the hotkey) only stops the audio
+  reaching the recognizer — the stream itself never closes. When PulseAudio takes the mic away (a restart,
+  a new default source, an unplugged headset, resume from suspend) the stream brings it back by itself,
+  waiting up to 5 s between tries, and the recognizer starts clean on the new audio instead of joining it
+  onto the old. If the wake-word thread itself ever dies, Rose notices within ~10 s and starts listening
+  again; both are noted in `~/rose/companion.log`.
+
 ## Setup
 
 ```sh

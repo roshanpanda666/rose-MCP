@@ -75,8 +75,11 @@ function createWindow() {
   win.once("ready-to-show", () => win.show());
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) shell.openExternal(url); return { action: "deny" }; });
   win.webContents.on("will-navigate", (e) => e.preventDefault());
-  win.on("close", (e) => {           // close = hide to tray; Quit from the tray menu
-    if (!quitting && tray) { e.preventDefault(); win.hide(); }
+  win.on("close", (e) => {           // close = keep running in the background; Quit from the tray menu
+    if (quitting) return;
+    e.preventDefault();
+    win.hide();
+    backgroundNotice();
   });
 }
 
@@ -84,6 +87,22 @@ function show(section) {
   if (!win) return;
   win.show(); win.focus();
   if (section) win.webContents.send("goto", section);
+}
+
+// Closing the window keeps ROSE running (backend, phone link, watchers). Say so once, the first time.
+const NOTICE_FILE = path.join(process.env.ROSE_HOME || path.join(os.homedir(), "rose"), ".desktop-background-notice");
+function backgroundNotice() {
+  try {
+    if (fs.existsSync(NOTICE_FILE)) return;
+    fs.mkdirSync(path.dirname(NOTICE_FILE), { recursive: true });
+    fs.writeFileSync(NOTICE_FILE, new Date().toISOString() + "\n");
+  } catch { /* can't remember it: show the notice again next time, no harm */ }
+  new Notification({
+    title: "ROSE is still running",
+    body: tray ? "She keeps listening in the background. Open her from the tray icon, or Quit there to stop."
+      : "She keeps listening in the background. Start ROSE again to reopen this window.",
+    icon: ICON,
+  }).show();
 }
 
 function createTray() {
@@ -98,7 +117,7 @@ function createTray() {
     { label: "Show Rose", click: () => call("face", { action: "show" }).catch(() => {}) },
     { label: "Lockdown ON", click: () => call("set_lockdown", { on: true }).catch(() => {}) },
     { type: "separator" },
-    { label: "Quit", click: () => { quitting = true; app.quit(); } },
+    { label: "Quit ROSE Desktop", click: () => { quitting = true; app.quit(); } },
   ]));
   tray.on("click", () => show());
 }
@@ -122,5 +141,6 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true; backend?.stdin.end(); backend?.kill();
     setTimeout(() => app.exit(0), 1500);   // the tray can keep a quitting app alive on Linux
   });
-  app.on("window-all-closed", () => { if (!tray) app.quit(); });
+  // Never quit on a closed window: ROSE stays in the background (tray, or start her again to reopen).
+  app.on("window-all-closed", () => { });
 }

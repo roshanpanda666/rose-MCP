@@ -152,6 +152,13 @@ def cmd_face(args) -> int:
     if args.wheel:
         from rose.companion import trigger_wheel
         return trigger_wheel()
+    if args.hide:  # close her away; the process keeps listening ("Hey Rose", hotkey, `rose face`)
+        from rose.companion import trigger_hide
+        if trigger_hide() == 0:
+            print("Rose is in the background, still listening.")
+            return 0
+        print("Rose wasn't running.")
+        return 1
     if args.ui:
         from rose.companion import _running_pid, _save_state, start_detached, stop
         _save_state(face_ui=args.ui)
@@ -452,7 +459,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("config", help="show settings").set_defaults(fn=cmd_config)
     p = sub.add_parser("face", help="Rose's animated face and message box on the desktop")
     p.add_argument("--delay", type=float, default=0, help="seconds to wait before opening")
-    p.add_argument("--stop", action="store_true", help="close Rose's face")
+    p.add_argument("--hide", action="store_true", help="put Rose in the background (windows away, still listening)")
+    p.add_argument("--stop", action="store_true", help="stop Rose for real (no more listening)")
     p.add_argument("--restart", action="store_true", help="reload Rose's face (new code, fresh state)")
     p.add_argument("--wake", choices=["on", "off"], help='turn the offline "Hey Rose" wake word on/off')
     p.add_argument("--talk", action="store_true", help="show Rose, open her chat and push-to-talk (bind to a desktop shortcut)")

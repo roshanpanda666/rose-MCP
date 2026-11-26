@@ -14,6 +14,7 @@ When Electron exits we exit; SIGTERM closes Electron first.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import signal
@@ -70,8 +71,27 @@ class Host:
         self.hotkey_label = ""
         self.stopping = False
         self.restart = False
+        self.hidden = False  # closed to the background: windows away, wake word and hotkey still running
+        self.barge = None  # wake.BargeIn while she talks: the user talking over her pauses her
+        self.face_ears = False  # the face hears the user over her itself (echo-cancelled mic): no wake.BargeIn
+        self.voice_id = 0  # the recording being streamed to the face right now (see _voice_begin)
+        self.wake_voice = 0
 
     # ---- to the face
+    # ---- what the user says goes to the face as it is recorded: it streams it on to rose-phone's /api/voice,
+    # which transcribes and answers in one request (no separate Whisper round trip, upload done when they stop)
+    def _voice_begin(self, source: str) -> int:
+        self.voice_id += 1
+        self.send("voice_begin", id=self.voice_id, source=source)
+        return self.voice_id
+
+    def _voice_chunk(self, vid: int, pcm: bytes) -> None:
+        if pcm:
+            self.send("voice_pcm", id=vid, pcm=base64.b64encode(pcm).decode())
+
+    def _voice_end(self, vid: int, cancelled: bool = False, error: str = "") -> None:
+        self.send("voice_end", id=vid, cancelled=cancelled, error=error)
+
     def send(self, ev: str, **kw) -> None:
         p = self.proc
         if p is None or p.stdin is None:
@@ -96,6 +116,9 @@ class Host:
         signal.signal(signal.SIGTERM, lambda *a: self.quit())
         signal.signal(signal.SIGINT, lambda *a: self.quit())
         signal.signal(signal.SIGUSR1, lambda *a: threading.Thread(target=self.hotkey_pressed, daemon=True).start())
+        # `rose face` / the dashboard: show her again, or close her to the background (companion.json "hidden")
+        signal.signal(signal.SIGUSR2,
+                      lambda *a: threading.Thread(target=self.apply_visibility, daemon=True).start())
         threading.Thread(target=self._context_loop, daemon=True).start()
         self._hotkey_start()
         st = comp._state()
@@ -107,6 +130,7 @@ class Host:
                   speak=bool(st.get("speak", False)), caveman=bool(st.get("caveman", True)),
                   wake=bool(st.get("wake", True)) and self._wake_available(), wake_available=self._wake_available(),
                   wheel=bool(st.get("wheel", True)), wheel_button=comp.wheel_button_shown(),
+                  barge=comp.barge_wanted(),
                   hotkey=self.hotkey_label, base=base)
         if st.get("talk_on_start"):  # started by `rose face --talk`
             comp._save_state(talk_on_start=False)
@@ -140,6 +164,28 @@ class Host:
 
         threading.Thread(target=force, daemon=True).start()
 
+    # ---- close to the background (she keeps listening) / come back
+    def background(self) -> None:
+        """Closing Rose only puts her away: this process stays alive, so "Hey Rose", the hotkey and
+        `rose face` can bring her straight back. Electron hides its own windows."""
+        comp._save_state(hidden=True)
+        if self.hidden:
+            return
+        self.hidden = True
+        comp.stop_wheel()  # the wheel comes and goes with Rose's face
+        self.send("background")
+
+    def show(self) -> None:
+        comp._save_state(hidden=False)
+        was_hidden, self.hidden = self.hidden, False
+        self.send("show")
+        if was_hidden and comp._state().get("wheel", True):
+            threading.Thread(target=comp.start_wheel, daemon=True).start()
+
+    def apply_visibility(self) -> None:
+        """SIGUSR2: follow companion.json "hidden" (set by `rose face` / `rose face --hide`)."""
+        (self.background if comp._state().get("hidden") else self.show)()
+
     def _cleanup(self) -> None:
         if self.wake:
             self.wake.stop()
@@ -150,13 +196,19 @@ class Host:
                 pass
         if self.ptt:
             self.ptt["stop"].set()
+        if self.barge:
+            self.barge.triggered = False
+            self.barge.stop()
         comp.stop_wheel()  # the wheel comes and goes with Rose's face
 
     # ---- from the face
     def handle(self, msg: dict) -> None:
         cmd = msg["cmd"]
         if cmd == "state":  # what the face is doing (the wake word waits while she talks/answers)
-            self.busy, self.talking = bool(msg.get("busy")), bool(msg.get("talking"))
+            self.busy = bool(msg.get("busy"))
+            if "talking" in msg:  # a turn's busy/idle message alone must not cut off her voice's barge-in
+                self.talking = bool(msg.get("talking"))
+            self._barge_follow()
         elif cmd == "save":  # remember settings/positions (companion.json, shared with the classic face)
             kw = {k: v for k, v in (msg.get("values") or {}).items() if k in STATE_KEYS}
             if kw:
@@ -171,6 +223,31 @@ class Host:
             elif self.wake:
                 self.wake.stop()
                 self.wake = None
+        elif cmd == "ears":  # the face opened its own echo-cancelled mic (or couldn't)
+            self.face_ears = bool(msg.get("on"))
+            if not self.face_ears and msg.get("error"):
+                comp._log(f"face mic: {msg.get('error')}; using the host's barge-in instead")
+            self._barge_follow()
+        elif cmd == "barge_start":  # the face heard the user talking over her: she has paused
+            self.send("barge", state="paused")
+        elif cmd == "barge_audio":  # ...and what they said
+            try:
+                wav = base64.b64decode(str(msg.get("wav") or ""), validate=True)
+            except ValueError:
+                wav = b""
+            if wav:
+                threading.Thread(target=self._barge_speech, args=(wav,), daemon=True).start()
+            else:
+                self.send("barge", state="resume")
+        elif cmd == "voice_done":  # the face heard (or didn't hear) what was said in a voice turn
+            if msg.get("source") == "barge":
+                if self.barge is not None and self.barge.triggered:
+                    self.barge = None
+                if not msg.get("heard"):  # a cough: she carries on, so listen over her again
+                    self._barge_follow()
+        elif cmd == "barge":  # right-click menu: "Stop when I talk over her"
+            comp._save_state(barge=bool(msg.get("on")))
+            self._barge_follow()
         elif cmd == "wheel":
             on = bool(msg.get("on"))
             comp._save_state(wheel=on)
@@ -187,7 +264,11 @@ class Host:
         elif cmd == "restart":
             self.restart = True
             self.quit()
-        elif cmd == "hide":
+        elif cmd == "hide":  # the window was closed: she stays in the background, still listening
+            self.background()
+        elif cmd == "show":
+            self.show()
+        elif cmd == "quit":  # "Quit Rose": really stop (the MCP server keeps running on its own)
             self.quit()
         elif cmd == "look":  # right-click menu: view (face / bust / full body)
             from rose import face_look
@@ -220,6 +301,8 @@ class Host:
                 hue = comp.theme_hue()
                 if hue is not None:
                     self.send("hue", hue=hue)
+            if n % 5 == 0:
+                self._wake_guard()
             n += 1
             time.sleep(2)
 
@@ -238,17 +321,87 @@ class Host:
 
         if not wake.available() or self.wake:
             return
+        def woken():
+            self._woken()
+            self.wake_voice = self._voice_begin("wake")
+
         self.wake = wake.WakeListener(
-            on_wake=lambda: self.send("wake"),
-            on_command=lambda wav: threading.Thread(target=self._wake_command, args=(wav,), daemon=True).start(),
-            paused=lambda: self.busy or self.talking or self.ptt is not None)
+            on_wake=woken,
+            on_command=lambda wav: self._voice_end(self.wake_voice),
+            paused=lambda: self.busy or self.talking or self.ptt is not None,
+            on_mic=self._mic_away,
+            on_chunk=lambda pcm: self._voice_chunk(self.wake_voice, pcm))
         self.wake.start()
 
+    def _wake_guard(self) -> None:
+        """Her ears must outlive everything, above all while she is closed away to the background and nobody
+        would notice: if the wake thread ever died (a Vosk or audio error), start listening again."""
+        if self.stopping or not comp._state().get("wake", True):
+            return
+        if self.wake is not None and not self.wake.is_alive():
+            comp._log("wake word: the listener stopped; starting it again")
+            self.wake = None
+        if self.wake is None:
+            self._wake_start()
+
+    def _mic_away(self, count: int, err: str | None) -> None:
+        """The mic went away (PulseAudio restarted, the default source changed, resume from suspend). The
+        stream reopens itself, so this is only worth saying the first few times."""
+        if count <= 3 or count % 60 == 0:
+            comp._log(f"mic went away ({count}x){f': {err}' if err else ''}; waiting for it to come back")
+
+    def _woken(self) -> None:
+        """"Hey Rose": she comes back even if the window was closed to the background."""
+        self.show()
+        self.send("wake")
+
     def _wake_command(self, wav: bytes) -> None:
+        """Whole-recording path (transcribe here, then the face sends it). Voice turns normally stream instead."""
         from rose import wake
 
         text = comp.transcribe(wav)
         self.send("voice_cmd", text=wake.strip_wake(text) if text is not None else None)
+
+    # ---- talking over her (barge-in): she pauses, listens, then takes the new command or carries on
+    def _barge_follow(self) -> None:
+        """Listen for the user while (and only while) her voice plays."""
+        want = (self.talking and self.ptt is None and not self.stopping and not self.face_ears
+                and comp.barge_wanted())
+        cur = self.barge
+        if want and cur is None:
+            from rose import wake
+
+            vid = {"id": 0}
+
+            def start():
+                self._barge_start()
+                vid["id"] = self._voice_begin("barge")
+
+            self.barge = wake.BargeIn(on_start=start, on_speech=lambda wav: self._voice_end(vid["id"]),
+                                      on_chunk=lambda pcm: self._voice_chunk(vid["id"], pcm))
+            self.barge.start()
+        elif not want and cur is not None and not cur.triggered:
+            cur.stop()
+            self.barge = None
+
+    def _barge_start(self) -> None:
+        comp._log("barge-in: heard the user over her voice; pausing")
+        self.send("barge", state="paused")
+
+    def _barge_speech(self, wav: bytes) -> None:
+        """A whole recording of the user talking over her (older faces send it as barge_audio)."""
+        from rose import wake
+
+        self.send("barge", state="transcribing")
+        text = comp.transcribe(wav)
+        text = wake.strip_wake(text).strip() if text else ""
+        self.barge = None
+        if text:  # a new command: her old reply is dropped, the new one is sent
+            self.send("barge", state="stop")
+            self.send("voice_cmd", text=text)
+        else:  # a cough, or nothing Whisper could use: she carries on where she was
+            self.send("barge", state="resume")
+            self._barge_follow()
 
     # ---- hotkey / mic button: push-to-talk (again = cancel)
     def _hotkey_start(self) -> None:
@@ -281,6 +434,7 @@ class Host:
             self.ptt = None
             self.send("ptt", state="cancelled")
             return
+        self.show()  # push-to-talk brings her back from the background
         self.ptt_gen += 1
         self.ptt = {"stop": threading.Event(), "gen": self.ptt_gen}
         again = f"{self.hotkey_label} again" if self.hotkey_label else "the mic again"
@@ -288,23 +442,22 @@ class Host:
         threading.Thread(target=self._ptt_run, args=(self.ptt["stop"], self.ptt_gen), daemon=True).start()
 
     def _ptt_run(self, stop: threading.Event, gen: int) -> None:
+        """Record until they pause, streaming it to the face as it comes (the face says "transcribing" and
+        what was heard)."""
         from rose import wake
 
+        vid = self._voice_begin("ptt")
+        error = ""
         try:
-            wav = wake.push_to_talk(stop)
+            wake.push_to_talk(stop, on_chunk=lambda pcm: self._voice_chunk(vid, pcm))
         except Exception as e:
             comp._log(f"push-to-talk failed: {type(e).__name__}: {e}")
-            wav = None
+            error = "Couldn't record from the mic."
         if stop.is_set() or not self.ptt or self.ptt["gen"] != gen:
-            return
-        text = None
-        if wav is not None:
-            self.send("ptt", state="transcribing")
-            text = comp.transcribe(wav)
-        if not self.ptt or self.ptt["gen"] != gen:
+            self._voice_end(vid, cancelled=True)
             return
         self.ptt = None
-        self.send("ptt", state="text", text=(text.strip() if text is not None else None))
+        self._voice_end(vid, error=error)
 
 
 class _Q:

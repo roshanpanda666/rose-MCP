@@ -29,6 +29,7 @@ import os
 import queue
 import random
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -297,6 +298,49 @@ def _envelope(wav_bytes: bytes, step: float = 0.04) -> list[float]:
         return []
 
 
+_voice = {"proc": None, "paused": False}  # the paplay saying her reply right now
+_voice_lock = threading.Lock()
+
+
+def speaking() -> bool:
+    """Her voice is playing (or paused mid-reply) on the laptop speakers."""
+    p = _voice["proc"]
+    return p is not None and p.poll() is None
+
+
+def pause_speech() -> None:
+    """Hold her voice where it is (SIGSTOP; paplay runs with a short buffer, so she stops within ~0.1 s)."""
+    with _voice_lock:
+        p = _voice["proc"]
+        if p is not None and p.poll() is None and not _voice["paused"]:
+            p.send_signal(signal.SIGSTOP)
+            _voice["paused"] = True
+
+
+def resume_speech() -> None:
+    with _voice_lock:
+        p = _voice["proc"]
+        if p is not None and p.poll() is None and _voice["paused"]:
+            p.send_signal(signal.SIGCONT)
+        _voice["paused"] = False
+
+
+def stop_speech() -> None:
+    """Cut her off for good."""
+    with _voice_lock:
+        p = _voice["proc"]
+        if p is not None and p.poll() is None:
+            p.kill()
+            if _voice["paused"]:
+                p.send_signal(signal.SIGCONT)
+        _voice["paused"] = False
+
+
+def barge_wanted() -> bool:
+    """Talking over her pauses her and she listens (right-click menu; on unless turned off)."""
+    return bool(_state().get("barge", True))
+
+
 def speak(text: str, events: queue.Queue | None = None) -> None:
     """Say a reply on the laptop speakers with Rose's voice (rose-phone /api/tts); her mouth follows it."""
     base, token = _backend()
@@ -311,7 +355,14 @@ def speak(text: str, events: queue.Queue | None = None) -> None:
             f.flush()
             if events is not None:
                 events.put(("lips", _envelope(audio)))
-            subprocess.run(["paplay", f.name], timeout=120)
+            stop_speech()  # one voice at a time
+            with _voice_lock:
+                proc = _voice["proc"] = subprocess.Popen(["paplay", "--latency-msec=100", f.name])
+                _voice["paused"] = False
+            try:
+                proc.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                proc.kill()
     except Exception:
         pass
 
@@ -375,6 +426,32 @@ def trigger_talk() -> int:
     _save_state(talk_on_start=True)
     start_detached()
     return 0
+
+
+def trigger_visibility(show: bool) -> int:
+    """Show a running Rose or close her to the background (she keeps listening): the choice goes into
+    companion.json and SIGUSR2 tells her to apply it. 0 if one was running."""
+    import signal
+
+    pid = _running_pid()
+    if pid is None:
+        return 1
+    _save_state(hidden=not show)
+    try:
+        os.kill(pid, signal.SIGUSR2)
+    except OSError:
+        return 1
+    return 0
+
+
+def trigger_show() -> int:
+    """Bring a running Rose back from the background. 0 if one was running."""
+    return trigger_visibility(True)
+
+
+def trigger_hide() -> int:
+    """Put a running Rose in the background: no windows, still listening. 0 if one was running."""
+    return trigger_visibility(False)
 
 
 # ---------------------------------------------------------------- files to the phone (worker thread)
@@ -1221,6 +1298,8 @@ class Companion(tk.Tk):
         self.jump_at = -10.0
         self.tool = None  # {"name", "at", "done"}: the tool Rose is using (drives her props)
         self.lips = None  # {"start", "levels"}: loudness of the voice playing now (lip sync)
+        self.barge = None  # wake.BargeIn while her voice plays: the user talking over her pauses her
+        self.barge_paused_at = 0.0
         self.listen_until = 0.0  # after "Hey Rose", until the command is heard
         self.proud_at = self.sad_at = self.surprised_at = self.love_at = -1e9
         self._x = None  # (display, window) for shape updates
@@ -1247,6 +1326,7 @@ class Companion(tk.Tk):
         self.sys = None  # Claude Code / CI state (read_system_state)
         self.sys_proud_until = self.worried_at = -1e9
         self.bubble = Bubble(self)
+        self.hidden = False  # closed to the background: windows away, wake word and hotkey still running
         if _state().get("wake", True):
             self._wake_start()
         self.hotkey = None
@@ -1275,6 +1355,33 @@ class Companion(tk.Tk):
         stop_wheel()  # the wheel comes and goes with Rose's face
         super().destroy()
 
+    # ---- close to the background (she keeps listening) / come back
+    def hide_to_background(self):
+        """Closing Rose only puts her away: this process stays alive, so "Hey Rose", the hotkey and
+        `rose face` can bring her straight back."""
+        _save_state(hidden=True)
+        if self.hidden:
+            return
+        self.hidden = True
+        self.chatbox.hide()
+        self.bubble.hide()
+        self.withdraw()
+        stop_wheel()
+
+    def show_from_background(self):
+        _save_state(hidden=False)
+        if not self.hidden:
+            return
+        self.hidden = False
+        self.deiconify()
+        self.lift()
+        self.jump_at = time.monotonic()
+        self._wheel_start()
+
+    def apply_visibility(self):
+        """SIGUSR2: follow companion.json "hidden" (set by `rose face` / `rose face --hide`)."""
+        (self.hide_to_background if _state().get("hidden") else self.show_from_background)()
+
     # ---- menu / drag / click
     def _menu_build(self):
         self.menu = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT, activebackground=ACCENT, activeforeground="white",
@@ -1292,6 +1399,9 @@ class Companion(tk.Tk):
         self.wake_var = tk.BooleanVar(value=_state().get("wake", True) and wake.available())
         self.menu.add_checkbutton(label='Listen for "Hey Rose" (offline)', variable=self.wake_var,
                                   command=self._toggle_wake)
+        self.barge_var = tk.BooleanVar(value=barge_wanted())
+        self.menu.add_checkbutton(label="Stop talking when I talk", variable=self.barge_var,
+                                  command=lambda: _save_state(barge=self.barge_var.get()))
         self.menu.add_command(label="New conversation", command=self._new_chat)
         self.wheel_var = tk.BooleanVar(value=_state().get("wheel", True))
         self.menu.add_checkbutton(label="Menu wheel", variable=self.wheel_var, command=self._toggle_wheel)
@@ -1300,7 +1410,8 @@ class Companion(tk.Tk):
                                   command=lambda: set_wheel_button(self.wheel_btn_var.get()))
         self.menu.add_separator()
         self.menu.add_command(label="Restart Rose", command=self._restart)
-        self.menu.add_command(label="Hide Rose", command=self.destroy)
+        self.menu.add_command(label="Hide Rose (keeps listening)", command=self.hide_to_background)
+        self.menu.add_command(label="Quit Rose (stops listening)", command=self.destroy)
 
     def _restart(self):
         PID_FILE.unlink(missing_ok=True)
@@ -1316,8 +1427,53 @@ class Companion(tk.Tk):
         self.wake = wake.WakeListener(
             on_wake=lambda: self.events.put(("wake", None)),
             on_command=lambda wav: threading.Thread(target=self._transcribe, args=(wav,), daemon=True).start(),
-            paused=lambda: self.busy or self.ptt is not None or time.monotonic() < self.talk_until + 0.6)
+            paused=lambda: self.busy or self.ptt is not None or time.monotonic() < self.talk_until + 0.6,
+            on_mic=lambda n, err: (_log(f"mic went away ({n}x){f': {err}' if err else ''}; waiting for it to "
+                                        "come back") if n <= 3 or n % 60 == 0 else None))
         self.wake.start()
+
+    def _wake_guard(self):
+        """Her ears must outlive everything, above all while she is closed away and nobody would notice: if
+        the wake thread ever died (a Vosk or audio error), start listening again. The mic itself comes back
+        on its own (rose.wake.MicStream)."""
+        if not _state().get("wake", True):
+            return
+        if self.wake is not None and not self.wake.is_alive():
+            _log("wake word: the listener stopped; starting it again")
+            self.wake = None
+        if self.wake is None:
+            self._wake_start()
+
+    # ---- talking over her (barge-in): she pauses, listens, then takes the new command or carries on
+    def _barge_tick(self):
+        want = speaking() and self.ptt is None and self.barge_var.get()
+        cur = self.barge
+        if want and cur is None:
+            from rose import wake
+
+            self.barge = wake.BargeIn(on_start=self._barge_start, on_speech=self._barge_speech)
+            self.barge.start()
+        elif not want and cur is not None and not cur.triggered:
+            cur.stop()
+            self.barge = None
+
+    def _barge_start(self):
+        pause_speech()
+        self.events.put(("barge", None))
+
+    def _barge_speech(self, wav: bytes):
+        from rose import wake
+
+        text = transcribe(wav)
+        self.events.put(("barge_text", wake.strip_wake(text).strip() if text else ""))
+
+    def _wake_tick(self):
+        """_tick runs many times a second; her ears only need looking at every 10 s."""
+        now = time.monotonic()
+        if now - getattr(self, "_wake_checked", 0) < 10:
+            return
+        self._wake_checked = now
+        self._wake_guard()
 
     def _toggle_wake(self):
         on = self.wake_var.get()
@@ -1370,6 +1526,7 @@ class Companion(tk.Tk):
             self.listen_until = 0
             cb.set_text("Cancelled.")
             return
+        self.show_from_background()
         if self.state() != "normal":
             self.deiconify()
         self.lift()
@@ -1531,7 +1688,8 @@ class Companion(tk.Tk):
                 self.tool = {"name": val, "at": time.monotonic(), "done": 0.0}
                 self.status = f"using {val}…"
                 cb.set_text((self.reply + "\n" if self.reply else "") + f"⚙ {val}…")
-            elif kind == "wake":  # "Hey Rose": she hops up and listens
+            elif kind == "wake":  # "Hey Rose": she hops up and listens (even if she was closed away)
+                self.show_from_background()
                 self.jump_at = time.monotonic()
                 self.listen_until = time.monotonic() + 10
                 cb.set_text("🎙️ Listening…")
@@ -1544,6 +1702,33 @@ class Companion(tk.Tk):
                 else:
                     cb.set_text("Yes? I didn't catch that. Say \"Hey Rose\" again." if val == "" else
                                 "Couldn't reach Whisper for that one.")
+            elif kind == "barge":  # the user started talking over her: she pauses and listens
+                now = time.monotonic()
+                self.barge_paused_at = now
+                self.listen_until = now + 20
+                cb.set_text("🎙️ Listening…")
+                if not cb.visible():
+                    cb.show(focus=False)
+            elif kind == "barge_text":
+                self.barge = None
+                self.listen_until = 0
+                now = time.monotonic()
+                if val:  # a new command: her old reply is dropped
+                    stop_speech()
+                    self.lips, self.talk_until = None, 0
+                    if self.busy:
+                        cb.entry.delete(0, "end")
+                        cb.entry.insert(0, val)
+                    else:
+                        self.send(spoken=val)
+                else:  # nothing worth sending: she carries on where she was
+                    held = now - self.barge_paused_at if self.barge_paused_at else 0
+                    if self.lips:
+                        self.lips["start"] += held
+                    self.talk_until += held
+                    cb.set_text(self.reply or "")
+                    resume_speech()
+                self.barge_paused_at = 0.0
             elif kind == "lips":  # playback starts now: mouth follows the voice, she talks until it ends
                 self.lips = {"start": time.monotonic(), "levels": val}
                 self.talk_until = time.monotonic() + len(val) * 0.04 + 0.2
@@ -1622,8 +1807,16 @@ class Companion(tk.Tk):
         return self.ctx_mood
 
     def _tick(self):
+        if self.hidden:  # closed to the background: nothing to draw, but she keeps listening
+            self._drain_events()
+            self._wake_tick()
+            self._barge_tick()
+            self.after(200, self._tick)
+            return
         try:
             self._drain_events()
+            self._wake_tick()
+            self._barge_tick()
             now = time.monotonic()
             if now - getattr(self, "_raised_at", 0) > 2:  # frameless windows drop behind newly raised apps
                 self._raised_at = now
@@ -1933,7 +2126,7 @@ def run(action: str = "show") -> int:
     """`rose face` [--stop | --restart]: one companion at a time."""
     ROSE_HOME.mkdir(parents=True, exist_ok=True)
     if action == "stop":
-        print("Rose's face closed." if stop() else "Rose's face wasn't showing.")
+        print("Rose stopped listening." if stop() else "Rose wasn't running.")
         return 0
     if action == "restart":
         stop()
@@ -1942,10 +2135,15 @@ def run(action: str = "show") -> int:
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("Rose's face is already on screen (rose face --restart to reload it).")
+        # already running, maybe closed to the background: bring her back instead of doing nothing
+        if trigger_show() == 0:
+            print("Rose is back on screen (she was listening in the background).")
+        else:
+            print("Rose's face is already on screen (rose face --restart to reload it).")
         return 0
     if not os.environ.get("DISPLAY"):
         os.environ["DISPLAY"] = ":0"
+    _save_state(hidden=False)  # a fresh start always shows her
     PID_FILE.write_text(str(os.getpid()))
     import signal
 
@@ -1960,6 +2158,7 @@ def run(action: str = "show") -> int:
     app = Companion()
     signal.signal(signal.SIGTERM, lambda *a: app.after(0, app.destroy))
     signal.signal(signal.SIGUSR1, lambda *a: app.events.put(("hotkey", None)))  # `rose face --talk`
+    signal.signal(signal.SIGUSR2, lambda *a: app.after(0, app.apply_visibility))  # `rose face` / `--hide`
     app.after(500, lambda: None)  # keeps the Tcl loop waking so the signal handler runs
     try:
         app.mainloop()

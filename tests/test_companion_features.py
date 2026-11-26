@@ -199,3 +199,52 @@ def test_trigger_talk(monkeypatch):
     monkeypatch.setattr(companion, "_running_pid", lambda: None)
     companion.trigger_talk()
     assert started == [1] and companion._state().get("talk_on_start") is True
+
+
+def test_trigger_visibility(monkeypatch):
+    """`rose face` on a Rose who is listening in the background brings her back; --hide puts her there."""
+    import signal
+
+    sent = []
+    monkeypatch.setattr(companion, "_running_pid", lambda: 4242)
+    monkeypatch.setattr(companion.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+
+    assert companion.trigger_hide() == 0
+    assert sent == [(4242, signal.SIGUSR2)] and companion._state().get("hidden") is True
+    assert companion.trigger_show() == 0
+    assert sent[-1] == (4242, signal.SIGUSR2) and companion._state().get("hidden") is False
+
+    monkeypatch.setattr(companion, "_running_pid", lambda: None)  # nobody listening: nothing to show
+    assert companion.trigger_show() == 1
+
+
+def test_her_voice_pauses_resumes_and_stops(monkeypatch):
+    """Talking over her holds her voice (SIGSTOP), she carries on (SIGCONT), or she is cut off."""
+    import subprocess
+
+    from rose import companion as comp
+
+    proc = subprocess.Popen(["sleep", "30"])
+    monkeypatch.setitem(comp._voice, "proc", proc)
+    monkeypatch.setitem(comp._voice, "paused", False)
+    try:
+        assert comp.speaking()
+        comp.pause_speech()
+        assert comp._voice["paused"] and comp.speaking()
+        comp.resume_speech()
+        assert not comp._voice["paused"]
+        comp.pause_speech()
+        comp.stop_speech()
+        proc.wait(timeout=2)
+        assert not comp.speaking() and not comp._voice["paused"]
+    finally:
+        proc.kill()
+
+
+def test_barge_is_on_unless_turned_off(monkeypatch):
+    from rose import companion as comp
+
+    monkeypatch.setattr(comp, "_state", lambda: {})
+    assert comp.barge_wanted()
+    monkeypatch.setattr(comp, "_state", lambda: {"barge": False})
+    assert not comp.barge_wanted()

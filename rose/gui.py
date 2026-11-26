@@ -77,7 +77,8 @@ class RoseGUI(ctk.CTk):
                                    ("Hey Rose: off", ["rose", "face", "--wake", "off"], "#374151"),
                                    ("Show Rose", ["rose", "face"], "#e0577f"),
                                    ("Restart Rose", ["rose", "face", "--restart"], "#7c3aed"),
-                                   ("Hide Rose", ["rose", "face", "--stop"], "#4b5563")):
+                                   ("Hide Rose", ["rose", "face", "--hide"], "#4b5563"),  # keeps listening
+                                   ("Stop Rose", ["rose", "face", "--stop"], "#4b5563")):
             ctk.CTkButton(rose_btns, text=label, width=96, fg_color=color,
                           command=lambda a=args: subprocess.Popen(a, start_new_session=True)).pack(side="left",
                                                                                                     padx=2)

@@ -199,12 +199,17 @@ function hideBubble() {
 bubbleText.addEventListener("click", () => { hideBubble(); window.rose.click(); });
 
 // ---------------- voice (her real voice, lip-synced) ----------------
+// A reply is spoken while it streams in: each finished sentence goes to /api/tts at once (the first one as
+// soon as there is a short sentence or clause, so she starts talking quickly), two clips are fetched ahead
+// while one plays. begin() / feed(delta) / end() for a streamed reply; speak(text) for a whole text.
 const voice = (() => {
+  const AHEAD = 2, MAX_CHARS = 1800;
   let ctx = null, analyser = null, buf = null, queue = [], playing = null, gen = 0, level = null;
+  let open = false, pending = "", emitted = false, chars = 0, held = false, wake = null, runGen = -1;
   const clean = (t) => t.replace(/```[\s\S]*?```/g, " ").replace(/`([^`]*)`/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     .replace(/https?:\/\/\S+/g, "link").replace(/[*_#>|~]/g, "").replace(/\s+/g, " ").trim();
   function sentences(t) {
-    const out = [], parts = clean(t).slice(0, 1800).match(/[^.!?。]+[.!?。]*\s*/g) || [];
+    const out = [], parts = t.match(/[^.!?。]+[.!?。]*\s*/g) || [];
     let cur = "";
     for (const p of parts) { if ((cur + p).length > 220 && cur) { out.push(cur.trim()); cur = ""; } cur += p; }
     if (cur.trim()) out.push(cur.trim());
@@ -217,42 +222,92 @@ const voice = (() => {
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes.buffer;
   }
-  async function speak(text) {
-    stop();
-    const my = ++gen, parts = sentences(text);
-    if (!parts.length) return;
-    ctx = ctx || new AudioContext();
-    if (ctx.state === "suspended") await ctx.resume();
-    analyser = analyser || Object.assign(ctx.createAnalyser(), { fftSize: 512 });
-    if (!analyser._wired) { analyser.connect(ctx.destination); analyser._wired = true; }
-    buf = buf || new Float32Array(analyser.fftSize);
-    queue = parts.map((p) => ({ text: p, data: null }));
-    queue[0].data = fetchClip(queue[0].text);
-    while (queue.length && my === gen) {
-      const item = queue.shift();
-      if (queue[0]) queue[0].data = fetchClip(queue[0].text); // fetch the next sentence while this one plays
-      const raw = await item.data;
-      if (!raw || my !== gen) continue;
-      let audio;
-      try { audio = await ctx.decodeAudioData(raw); } catch { continue; }
-      if (my !== gen) return;
-      await new Promise((res) => {
-        const src = ctx.createBufferSource(); src.buffer = audio; src.connect(analyser);
-        src.onended = res; playing = src; src.start();
-        report();
-      });
-      playing = null;
-    }
-    if (my === gen) { queue = []; report(); }
+  function prefetch() { for (let i = 0; i < Math.min(AHEAD, queue.length); i++) if (!queue[i].data) queue[i].data = fetchClip(queue[i].text); }
+  function emit(raw) {
+    let t = clean(raw);
+    if (!t || chars >= MAX_CHARS) return;
+    t = t.slice(0, MAX_CHARS - chars); chars += t.length;
+    for (const p of sentences(t)) queue.push({ text: p, data: null });
+    emitted = true;
+    prefetch(); kick(); report();
   }
-  function stop() {
-    gen++; queue = [];
-    if (playing) { try { playing.stop(); } catch { /* done */ } playing = null; }
+  function kick() {
+    if (wake) { const w = wake; wake = null; w(); }
+    if (runGen !== gen) { runGen = gen; run(gen); }
+  }
+  async function run(my) {
+    try {
+      ctx = ctx || new AudioContext();
+      if (ctx.state === "suspended" && !held) await ctx.resume();
+      analyser = analyser || Object.assign(ctx.createAnalyser(), { fftSize: 512 });
+      if (!analyser._wired) { analyser.connect(ctx.destination); analyser._wired = true; }
+      buf = buf || new Float32Array(analyser.fftSize);
+      while (my === gen) {
+        if (!queue.length) {
+          if (!open) break;
+          await new Promise((r) => { wake = r; });   // the next sentence hasn't streamed in yet
+          continue;
+        }
+        const item = queue.shift();
+        prefetch(); // keep two clips coming while this one plays
+        const raw = await item.data;
+        if (!raw || my !== gen) continue;
+        let audio;
+        try { audio = await ctx.decodeAudioData(raw); } catch { continue; }
+        if (my !== gen) return;
+        const src = ctx.createBufferSource(); src.buffer = audio; src.connect(analyser);
+        await new Promise((res) => { src.onended = res; playing = src; src.start(); report(); });
+        if (playing === src) playing = null;
+      }
+    } finally {
+      if (runGen === my) runGen = -1;
+      if (my === gen) { queue = []; report(); }
+    }
+  }
+  /** A reply starts streaming: speak it as it comes. */
+  function begin() { stop(); open = true; }
+  function feed(delta) {
+    if (!open) return;
+    pending += delta || "";
+    let cut = -1, m;
+    const boundary = /[.!?…:;](?=\s)|\n/g;
+    while ((m = boundary.exec(pending))) cut = m.index + m[0].length;
+    if (!emitted && cut < 0 && pending.length > 60) {  // no sentence yet: a clause is enough to start
+      const comma = /,(?=\s)/g;
+      while ((m = comma.exec(pending))) cut = m.index + 1;
+    }
+    if (cut <= 0 || (cut < (emitted ? 40 : 12) && pending.length <= 220)) return;
+    if ((pending.slice(0, cut).match(/```/g) || []).length % 2 === 1) return; // inside a code block: wait for it to close
+    emit(pending.slice(0, cut));
+    pending = pending.slice(cut);
+  }
+  /** The reply is complete: say what's left, then she's done. */
+  function end() {
+    if (!open) return;
+    const rest = pending; pending = ""; open = false;
+    emit(rest);
+    kick();
     report();
   }
+  function speak(text) { stop(); emit(text); }
+  function stop() {
+    gen++; queue = []; open = false; pending = ""; emitted = false; chars = 0; held = false;
+    if (wake) { const w = wake; wake = null; w(); }
+    if (playing) { try { playing.stop(); } catch { /* done */ } playing = null; }
+    if (ctx && ctx.state === "suspended") ctx.resume();  // a paused clip must end, not hang
+    report();
+  }
+  // the user talked over her: hold the voice exactly where it is, then carry on (or stop())
+  function pause() { if (ctx && ctx.state === "running" && speaking()) { held = true; ctx.suspend(); } }
+  function resume() { held = false; if (ctx && ctx.state === "suspended") ctx.resume(); }
   let reported = false;
-  function report() { const t = speaking(); if (t !== reported) { reported = t; window.rose.faceState({ talking: t }); } }
-  function speaking() { return !!playing || queue.length > 0; }
+  function report() {
+    const t = speaking();
+    if (t !== reported) { reported = t; window.rose.faceState({ talking: t }); }
+    earsFollow();
+  }
+  // talking from her first sentence until the reply is over (also in the short gaps between sentences)
+  function speaking() { return !!playing || queue.length > 0 || (open && emitted); }
   function lipLevel() {
     if (!playing || !analyser) return null;
     analyser.getFloatTimeDomainData(buf);
@@ -261,8 +316,103 @@ const voice = (() => {
     level = level == null ? v : level * 0.45 + v * 0.55;
     return level;
   }
-  return { speak, stop, speaking, lipLevel };
+  return { begin, feed, end, speak, stop, pause, resume, speaking, lipLevel };
 })();
+
+// ---------------- ears: the mic stays open while she talks, so the user can talk over her ----------------
+// The host's own barge-in compares mic and speaker loudness, which a webcam mic next to the laptop speaker
+// can't do: her echo is as loud as the user. Chromium's echo cancellation takes her voice out of this mic
+// (it knows exactly what she is playing), so a plain loudness check is enough to find the user.
+// Open while she answers or talks (the canceller settles while she thinks); closed a few seconds after.
+const ears = (() => {
+  const MIN = 0.015, WINDOW = 6, HITS = 4, PRE = 8, QUIET = 10, MAX = 117; // chunks of 2048 @ 16 kHz = 0.128 s
+  let want = false, stream = null, ctx = null, src = null, node = null, opening = false, closeTimer = 0, failed = false;
+  let floor = null, recent = [], pre = [], rec = null, warm = 0;
+
+  function rms(f) { let s = 0; for (let i = 0; i < f.length; i++) s += f[i] * f[i]; return Math.sqrt(s / f.length); }
+  function learn(lvl) { floor = floor == null ? lvl : Math.min(floor * 1.02 + 0.0002, Math.max(floor * 0.9, lvl)); }
+
+  async function open() {
+    want = true;
+    clearTimeout(closeTimer); closeTimer = 0;
+    if (stream || opening || failed) return;
+    opening = true;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 } });
+      ctx = new AudioContext({ sampleRate: 16000 });
+      src = ctx.createMediaStreamSource(stream);
+      node = ctx.createScriptProcessor(2048, 1, 1);
+      node.onaudioprocess = (e) => chunk(new Float32Array(e.inputBuffer.getChannelData(0)));
+      src.connect(node); node.connect(ctx.destination); // it only runs while connected; its output is silence
+      floor = null; recent = []; pre = []; rec = null; warm = 4; // ~0.5 s for the canceller to settle
+      window.rose.ears({ phase: "open" });
+    } catch (err) {
+      failed = true; // no mic for the face: the host's own barge-in carries on
+      window.rose.ears({ phase: "error", error: String((err && err.message) || err) });
+      shut();
+    } finally {
+      opening = false;
+    }
+    if (!want) shut();
+  }
+  function shut() {
+    if (rec) return; // the user is mid-sentence: finish() closes once they're done
+    try { if (node) node.disconnect(); if (src) src.disconnect(); } catch { /* gone */ }
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (ctx) ctx.close().catch(() => {});
+    stream = ctx = src = node = null;
+  }
+  function closeSoon() {
+    want = false;
+    if (!closeTimer && stream) closeTimer = setTimeout(() => { closeTimer = 0; if (!want) shut(); }, 4000);
+  }
+
+  function chunk(f) {
+    const lvl = rms(f);
+    if (rec) { record(f, lvl); return; }
+    pre.push(f); if (pre.length > PRE) pre.shift();
+    if (warm > 0) { warm--; return; }
+    if (!voice.speaking() || S.ptt) { learn(lvl); recent = []; return; } // only her talking is interrupted
+    const loud = lvl > Math.max(MIN, (floor ?? 0.005) * 3);
+    if (!loud) learn(lvl);
+    recent.push(loud); if (recent.length > WINDOW) recent.shift();
+    if (recent.filter(Boolean).length >= HITS) start();
+  }
+  function start() {
+    rec = { parts: pre.slice(), quiet: 0, n: 0 }; pre = []; recent = [];
+    voice.pause(); // she stops at once; the host says whether she drops the reply or carries on
+    window.rose.ears({ phase: "start" });
+  }
+  function record(f, lvl) {
+    rec.parts.push(f); rec.n++;
+    rec.quiet = lvl > Math.max(MIN * 0.8, (floor ?? 0.005) * 2.5) ? 0 : rec.quiet + 1;
+    if (rec.quiet >= QUIET || rec.n >= MAX) finish();
+  }
+  function finish() {
+    const parts = rec.parts, rate = ctx ? ctx.sampleRate : 16000;
+    rec = null;
+    window.rose.ears({ phase: "audio", wav: toWav(parts, rate) });
+    if (!want) shut();
+  }
+  function toWav(parts, rate) {
+    const n = parts.reduce((a, p) => a + p.length, 0), out = new DataView(new ArrayBuffer(44 + n * 2));
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) out.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, "RIFF"); out.setUint32(4, 36 + n * 2, true); str(8, "WAVEfmt "); out.setUint32(16, 16, true);
+    out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true);
+    out.setUint32(28, rate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+    str(36, "data"); out.setUint32(40, n * 2, true);
+    let o = 44;
+    for (const p of parts) for (let i = 0; i < p.length; i++, o += 2) out.setInt16(o, Math.max(-1, Math.min(1, p[i])) * 32767, true);
+    return new Uint8Array(out.buffer);
+  }
+  return { open, closeSoon };
+})();
+let bargeOn = true;
+function earsFollow() {
+  const answering = S.busy && (speakOn || voiceTurn);
+  if (bargeOn && (answering || voice.speaking())) ears.open(); else ears.closeSoon();
+}
 
 // ---------------- mood ----------------
 function sysState() {
@@ -479,15 +629,25 @@ window.rose.onCursor((p) => {
 });
 window.rose.onJump(jump);
 window.rose.onLook(({ look, win }) => setLook(look || {}, win));
-window.rose.onSettings((s) => { speakOn = !!s.speak; });
+window.rose.onSettings((s) => {
+  const was = speakOn;
+  speakOn = !!s.speak; bargeOn = s.barge !== false;
+  if (was && !speakOn && !voiceTurn) voice.stop(); // "Speak replies" switched off mid-reply: quiet now
+  earsFollow();
+});
 window.rose.onChatVisible((v) => { S.chatOpen = v; if (v && bubbleKind === "reply") hideBubble(); });
 window.rose.onTyping((on) => { S.typing = on; });
 window.rose.onSpeak((text) => voice.speak(text));
 window.rose.onHush(() => voice.stop());
 window.rose.onNewChat(() => { S.reply = ""; });
-window.rose.onTurn(({ busy }) => { S.busy = busy; if (busy) { S.reply = ""; voice.stop(); } });
+window.rose.onTurn(({ busy }) => {
+  S.busy = busy;
+  if (busy) { S.reply = ""; voice.stop(); if (speakOn || voiceTurn) voice.begin(); }
+  earsFollow();
+});
 window.rose.onUserMsg(({ text, voice: spoken }) => {
   voiceTurn = !!spoken;
+  earsFollow();
   if (LOVE.test(text)) S.loveAt = performance.now();
 });
 window.rose.onChatEv((ev) => {
@@ -495,7 +655,7 @@ window.rose.onChatEv((ev) => {
   switch (ev.type) {
     case "text":
       if (!S.reply) jump(); // she pops up to answer
-      S.reply += ev.delta || ""; S.lastDelta = now; break;
+      S.reply += ev.delta || ""; S.lastDelta = now; voice.feed(ev.delta); break;
     case "tool_call": S.tool = { name: ev.name || "", at: now, done: 0 }; break;
     case "tool_result":
       if (S.tool) S.tool.done = now;
@@ -504,9 +664,8 @@ window.rose.onChatEv((ev) => {
       break;
     case "tool_pending": S.surprisedAt = now; jump(); if (!S.chatOpen) say("Can I go ahead? Check the chat.", 10, "alert"); break;
     case "error": S.sadAt = now; if (!S.chatOpen) say(ev.message || "Something went wrong.", 8, "alert"); break;
-    case "done":
-      if (S.reply && (speakOn || voiceTurn)) voice.speak(S.reply);
-      voiceTurn = false; break;
+    case "stopped": voice.stop(); break;
+    case "done": voice.end(); voiceTurn = false; break;
     default: break;
   }
 });
@@ -527,6 +686,19 @@ window.rose.onHost((msg) => {
     case "notice": say(msg.text, 6); if (msg.ok) S.proudAt = now; else S.sadAt = now; jump(); break;
     case "wake": S.listenUntil = now + 10000; jump(); voice.stop(); break;
     case "voice_cmd": S.listenUntil = 0; break;
+    case "voice_heard":  // a voice turn was heard (or wasn't): stop looking like she's listening
+      S.listenUntil = 0; S.ptt = null;
+      if (bubbleKind === "news") hideBubble();
+      break;
+    case "barge":  // the user talked over her: pause, listen, then carry on or drop the reply
+      if (msg.state === "paused") { voice.pause(); S.listenUntil = now + 20000; if (!S.chatOpen) say("🎙️ Listening…", 0, "news"); }
+      else if (msg.state === "transcribing") { if (!S.chatOpen) say("✍️ Got it…", 0, "news"); }
+      else {
+        S.listenUntil = 0;
+        if (bubbleKind === "news") hideBubble();
+        if (msg.state === "stop") voice.stop(); else voice.resume();
+      }
+      break;
     case "ptt":
       S.ptt = msg.state === "listening" || msg.state === "transcribing" ? msg.state : null;
       if (msg.state === "listening") voice.stop();

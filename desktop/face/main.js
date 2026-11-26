@@ -28,14 +28,16 @@ let FW = 260, FH = 330;                   // face window (Rose + room for her sp
 const CHAT_SIZES = { normal: [400, 600], tall: [460, 800] };
 
 let face = null, chat = null;
-let settings = { speak: false, caveman: true, wake: false, wake_available: false, wheel: true, wheel_button: true, hotkey: "" };
+let settings = { speak: false, caveman: true, wake: false, wake_available: false, wheel: true, wheel_button: true, barge: true, hotkey: "" };
 let saved = {};                           // companion.json values the host gave us (positions, chat size)
 let convId = null, fresh = false;         // the conversation this chat continues (null = the shared thread)
 let turn = null;                          // { ctrl } while Rose answers
+let faceTalking = false;                   // her voice is playing (the face reports it on change only)
 let chatSize = "normal";
 const lastHost = {};
 let look = {};                            // companion.json "look" (dashboard Rose tab): size, animation, colours, voice
 let lookKey = "";
+let hidden = false;                       // closed to the background: windows away, the host keeps listening
 
 // ---------------- host (rose face) ----------------
 function toHost(cmd, extra = {}) {
@@ -45,10 +47,12 @@ function toHost(cmd, extra = {}) {
 function fromHost(msg) {
   const ev = msg.ev;
   if (ev === "quit") { app.exit(0); return; }
+  if (ev === "background") { goBackground(); return; }   // closed: hide, keep listening
+  if (ev === "show") { comeBack(); return; }             // "Hey Rose", the hotkey or `rose face` again
   if (ev === "init") {
     saved = msg.state || {};
     Object.assign(settings, { speak: !!msg.speak, caveman: !!msg.caveman, wake: !!msg.wake, wake_available: !!msg.wake_available,
-      wheel: !!msg.wheel, wheel_button: !!msg.wheel_button, hotkey: msg.hotkey || "" });
+      wheel: !!msg.wheel, wheel_button: !!msg.wheel_button, barge: msg.barge !== false, hotkey: msg.hotkey || "" });
     fresh = !!saved.fresh;
     if (saved.chat_size && CHAT_SIZES[saved.chat_size]) chatSize = saved.chat_size;
     if (face && Array.isArray(saved.face_pos)) placeFace(saved.face_pos[0], saved.face_pos[1]);
@@ -59,6 +63,9 @@ function fromHost(msg) {
   if (ev === "ptt" && msg.open) showChat(false);          // hotkey: open the chat; it shows "Listening…"
   if (ev === "ptt" && msg.state === "listening") jump();
   if (ev === "wake") showChat(false);
+  if (ev === "voice_begin") { voiceBegin(msg.id, msg.source); return; }
+  if (ev === "voice_pcm") { voiceChunk(msg.id, msg.pcm); return; }
+  if (ev === "voice_end") { voiceEnd(msg.id, !!msg.cancelled, msg.error || ""); return; }
   broadcast("host", msg);
 }
 
@@ -108,60 +115,233 @@ async function api(p, opts = {}) {
   }
 }
 
+/** A chat event from rose-phone: remember the conversation it started, then pass it to both windows. */
+function chatEvent(ev) {
+  if (ev.type === "start" && ev.conversation_id) {
+    convId = ev.conversation_id;
+    if (fresh) { fresh = false; toHost("save", { values: { fresh: false } }); }
+  }
+  broadcast("chat-ev", ev);
+}
+
+async function httpError(res) {
+  let detail = "";
+  try { detail = (await res.json()).detail; } catch { /* not JSON */ }
+  return res.status === 401 ? "Wrong or missing app token (rose-phone .env APP_TOKEN)."
+    : res.status === 409 ? "That conversation is still answering somewhere else (phone?). Try again in a moment."
+    : `Rose said ${res.status}${detail ? ": " + detail : ""}`;
+}
+
+/** Read an SSE response, one emit(event) per "data:" line. */
+async function readSSE(res, emit) {
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line.startsWith("data:")) continue;
+      let ev;
+      try { ev = JSON.parse(line.slice(5)); } catch { continue; /* keep-alive or partial */ }
+      emit(ev);
+    }
+  }
+}
+
+function turnBusy(b) {
+  broadcast("turn", { busy: b });
+  toHost("state", { busy: b, talking: faceTalking });
+}
+let turnIdle = [];   // resolvers waiting for the current turn to end
+function endTurn() {
+  turn = null;
+  for (const r of turnIdle.splice(0)) r();
+}
+const whenIdle = () => (turn ? new Promise((r) => turnIdle.push(r)) : Promise.resolve());
+
 /** POST a chat/approve turn and pass every SSE event to both windows. Resolves when the turn ends. */
 async function streamTurn(p, body) {
   if (turn) return { ok: false, error: "Rose is still answering." };
   const ctrl = new AbortController();
   turn = { ctrl };
-  broadcast("turn", { busy: true });
-  toHost("state", { busy: true });
+  turnBusy(true);
   let sawDone = false;
-  const emit = (ev) => {
-    if (ev.type === "start" && ev.conversation_id) {
-      convId = ev.conversation_id;
-      if (fresh) { fresh = false; toHost("save", { values: { fresh: false } }); }
-    }
-    if (ev.type === "done") sawDone = true;
-    broadcast("chat-ev", ev);
-  };
+  const emit = (ev) => { if (ev.type === "done") sawDone = true; chatEvent(ev); };
   try {
     const res = await fetch(BASE + p, {
       method: "POST", signal: ctrl.signal,
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token() },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      let detail = "";
-      try { detail = (await res.json()).detail; } catch { /* not JSON */ }
-      emit({ type: "error", message: res.status === 401 ? "Wrong or missing app token (rose-phone .env APP_TOKEN)."
-        : res.status === 409 ? "That conversation is still answering somewhere else (phone?). Try again in a moment."
-        : `Rose said ${res.status}${detail ? ": " + detail : ""}` });
-    } else {
-      const reader = res.body.getReader(), dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i;
-        while ((i = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, i).trim();
-          buf = buf.slice(i + 1);
-          if (!line.startsWith("data:")) continue;
-          try { emit(JSON.parse(line.slice(5))); } catch { /* keep-alive or partial */ }
-        }
-      }
-    }
+    if (!res.ok) emit({ type: "error", message: await httpError(res) });
+    else await readSSE(res, emit);
   } catch (err) {
     if (err.name === "AbortError") emit({ type: "stopped" });
     else emit({ type: "error", message: `Can't reach Rose (${err.message}). Is rose-phone running?` });
   } finally {
     if (!sawDone) broadcast("chat-ev", { type: "done" });
-    turn = null;
-    broadcast("turn", { busy: false });
-    toHost("state", { busy: false });
+    endTurn();
+    turnBusy(false);
   }
   return { ok: true };
+}
+
+// ---------------- voice turns: what the user says in, Rose's reply out, in one request ----------------
+// The host records (push-to-talk, "Hey Rose", talking over her) and streams the 16 kHz PCM here while the
+// user is still talking. It goes straight on to rose-phone's /api/voice, which transcribes and answers in the
+// same request (SSE): no separate /api/transcribe round trip, and the upload is done when they stop. The
+// face's own echo-cancelled mic sends its recording whole. Servers without /api/voice: transcribe, then chat.
+// While she is still answering, the words are only transcribed: talking over her drops that reply and sends
+// them; push-to-talk puts them in the chat box (as before).
+const RATE = 16000;
+const GHOST = /^[\s.,!?]*(thank you|thanks for watching|you)?[\s.,!?]*$/i;
+const stripWake = (t) => t.trim().replace(/^\W*(hey|hi|okay|ok)\W+(a\s*)?(rose|rosa|rosie)\b\W*/i, "").trim();
+let voice = null;   // the recording coming in: { id, source, pcm: Buffer[], ctrl, push, close, res }
+
+function voicePath(source) {
+  const q = new URLSearchParams({ rate: String(RATE), client: "desktop", caveman: settings.caveman ? "true" : "false" });
+  if (convId) q.set("conversation_id", convId);
+  else if (fresh) q.set("new", "true");
+  if (source === "wake") q.set("wake", "true");
+  return "/api/voice?" + q;
+}
+
+function voiceUpload(v, body, type) {
+  v.res = fetch(BASE + voicePath(v.source), {
+    method: "POST", signal: v.ctrl.signal, duplex: "half", body,
+    headers: { "Content-Type": type, Authorization: "Bearer " + token() },
+  });
+  v.res.catch(() => { /* read (or dropped) in voiceReply */ });
+}
+
+function voiceBegin(id, source) {
+  if (voice) voice.ctrl.abort();
+  const v = { id, source: String(source || "ptt"), pcm: [], ctrl: new AbortController(), push: null, close: null, res: null };
+  voice = v;
+  api("/api/voice/warm", { timeoutMs: 5000 });   // the server refreshes its Groq connection while they talk
+  if (turn) return;                              // she is still answering: keep the audio, decide at the end
+  const stream = new ReadableStream({
+    start(c) {
+      v.push = (b) => { try { c.enqueue(new Uint8Array(b)); } catch { /* closed */ } };
+      v.close = () => { try { c.close(); } catch { /* closed */ } };
+    },
+  });
+  voiceUpload(v, stream, `audio/l16; rate=${RATE}`);
+}
+
+function voiceChunk(id, b64) {
+  const v = voice;
+  if (!v || v.id !== id || typeof b64 !== "string") return;
+  const b = Buffer.from(b64, "base64");
+  v.pcm.push(b);
+  v.push?.(b);
+}
+
+function voiceEnd(id, cancelled, error) {
+  const v = voice;
+  if (!v || v.id !== id) return;
+  voice = null;
+  v.close?.();
+  if (cancelled) { v.ctrl.abort(); return; }
+  if (error) { v.ctrl.abort(); heard(v.source, "", { error }); return; }
+  if (!v.pcm.length) { v.ctrl.abort(); heard(v.source, ""); return; }
+  voiceFinish(v, wavOf(Buffer.concat(v.pcm), RATE)).catch((e) => process.stderr.write(`[voice] ${e.stack || e}\n`));
+}
+
+/** The face's own mic heard the user over her: one whole WAV. */
+function voiceFromFace(wav) {
+  const v = { id: -1, source: "barge", pcm: [], ctrl: new AbortController(), res: null };
+  voiceFinish(v, wav).catch((e) => process.stderr.write(`[voice] ${e.stack || e}\n`));
+}
+
+async function voiceFinish(v, wav) {
+  broadcast("host", { ev: v.source === "barge" ? "barge" : "ptt", state: "transcribing" });
+  if (!turn) {
+    if (!v.res) voiceUpload(v, wav, "audio/wav");
+    if (await voiceReply(v)) return;
+  } else {
+    v.ctrl.abort();
+  }
+  // she is still answering, or the server has no /api/voice: transcribe only, then decide
+  const r = await transcribe(wav);
+  let text = r.text || "";
+  if (v.source === "wake") text = stripWake(text);
+  if (r.error || !text) { heard(v.source, "", { error: r.error }); return; }
+  if (turn && v.source === "barge") { turn.ctrl.abort(); await whenIdle(); }
+  if (turn) { heard(v.source, text, { busy: true }); return; }   // the chat puts it in the box
+  heard(v.source, text);
+  broadcast("user-msg", { text, voice: true });
+  streamTurn("/api/chat", { message: text, conversation_id: convId, continue_current: !convId && !fresh,
+    client: "desktop", caveman: settings.caveman });
+}
+
+/** Rose's reply to a voice turn (SSE from /api/voice). False = this server has no /api/voice (use the old way). */
+async function voiceReply(v) {
+  if (turn) return false;
+  turn = { ctrl: v.ctrl };
+  let started = false, sawDone = false, said = false;
+  const begin = () => { if (!started) { started = true; turnBusy(true); } };
+  const emit = (ev) => {
+    if (ev.type === "heard") {
+      const text = String(ev.text || "").trim();
+      said = true;
+      heard(v.source, text, { stop: !!ev.stop });
+      if (text && !ev.stop) { broadcast("user-msg", { text, voice: true }); begin(); }
+      return;
+    }
+    if (ev.type === "done") { sawDone = true; if (!started) return; }
+    begin();
+    chatEvent(ev);
+  };
+  try {
+    const res = await v.res;
+    if ([404, 405, 415].includes(res.status)) { endTurn(); return false; }
+    if (!res.ok) { const msg = await httpError(res); endTurn(); heard(v.source, "", { error: msg }); return true; }
+    await readSSE(res, emit);
+  } catch (err) {
+    if (err.name === "AbortError") { if (started) emit({ type: "stopped" }); else if (!said) heard(v.source, "", { cancelled: true }); }
+    else if (started) emit({ type: "error", message: `Can't reach Rose (${err.message}). Is rose-phone running?` });
+    else heard(v.source, "", { error: `Can't reach Rose (${err.message}). Is rose-phone running?` });
+  } finally {
+    if (started && !sawDone) broadcast("chat-ev", { type: "done" });
+    if (turn && turn.ctrl === v.ctrl) endTurn();
+    if (started) turnBusy(false);
+  }
+  return true;
+}
+
+/** What was heard in a voice turn: both windows update (and the host's barge-in listens again if needed). */
+function heard(source, text, { error = "", stop = false, busy = false, cancelled = false } = {}) {
+  if (source === "barge") broadcast("host", { ev: "barge", state: text && !error ? "stop" : "resume" });
+  if (stop) face?.webContents.send("hush");
+  broadcast("host", { ev: "voice_heard", source, text, error, stop, busy, cancelled });
+  toHost("voice_done", { source, heard: !!text });
+}
+
+async function transcribe(wav) {
+  try {
+    const res = await fetch(BASE + "/api/transcribe", {
+      method: "POST", body: wav, signal: AbortSignal.timeout(60000),
+      headers: { "Content-Type": "audio/wav", Authorization: "Bearer " + token() },
+    });
+    if (!res.ok) return { error: res.status === 401 ? await httpError(res) : "Couldn't reach Whisper for that one." };
+    const text = String((await res.json()).text || "").trim();
+    return { text: GHOST.test(text) ? "" : text };
+  } catch {
+    return { error: "Couldn't reach Whisper for that one. Is rose-phone running?" };
+  }
+}
+
+function wavOf(pcm, rate) {
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0); h.writeUInt32LE(36 + pcm.length, 4); h.write("WAVEfmt ", 8); h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28);
+  h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write("data", 36); h.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([h, pcm]);
 }
 
 // ---------------- face window ----------------
@@ -194,6 +374,7 @@ function createFace() {
   face.webContents.on("console-message", (e) => {
     if (e.level === "warning" || e.level === "error") process.stderr.write(`[face] ${e.level}: ${e.message}\n`);
   });
+  face.on("close", (e) => { e.preventDefault(); closedByUser(); });   // closing her = background, not quit
   face.webContents.on("did-finish-load", () => {
     if (Array.isArray(saved.face_pos)) placeFace(saved.face_pos[0], saved.face_pos[1]);
     lookKey = ""; readState();
@@ -219,7 +400,10 @@ function createChat() {
   chat = new BrowserWindow({
     width: w, height: h, transparent: true, frame: false, resizable: false, hasShadow: false, alwaysOnTop: true,
     skipTaskbar: true, show: false, title: "Rose", backgroundColor: "#00000000", icon: fs.existsSync(ICON) ? ICON : undefined,
-    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true },
+    // hidden to the background, the chat stays a live window: Chromium must not throttle its timers, or a
+    // turn that lands while she is away (a wake word, the phone) would trickle in.
+    webPreferences: { preload: path.join(__dirname, "preload.js"), contextIsolation: true, nodeIntegration: false,
+      sandbox: true, backgroundThrottling: false },
   });
   chat.loadFile(path.join(__dirname, "chat.html"));
   chat.webContents.on("will-navigate", (e) => e.preventDefault());
@@ -228,6 +412,7 @@ function createChat() {
     if (e.level === "warning" || e.level === "error") process.stderr.write(`[chat] ${e.level}: ${e.message}\n`);
   });
   chat.webContents.on("did-finish-load", () => { chat.webContents.send("settings", settings); replay(chat); });
+  chat.on("close", (e) => { e.preventDefault(); chat.hide(); });   // the chat card only hides
   chat.on("show", () => broadcast("chat-visible", true));
   chat.on("hide", () => broadcast("chat-visible", false));
   chat.on("blur", () => chat.webContents.send("blur"));
@@ -249,6 +434,7 @@ function dockChat() {
 
 function showChat(focus = true) {
   if (!chat) return;
+  comeBack();                      // chatting with her brings her back if she was closed away
   if (!chat.isVisible()) dockChat();
   chat.show();
   if (focus) chat.focus();
@@ -259,6 +445,28 @@ function toggleChat() {
   if (!chat) return;
   if (chat.isVisible() && chat.isFocused()) chat.hide();
   else showChat(true);
+}
+
+// ---------------- background mode ----------------
+// Closing Rose puts her away, it never quits: both windows hide and the host (`rose face`) keeps the wake
+// word and the hotkey running, so "Hey Rose", push-to-talk or `rose face` bring her straight back.
+function goBackground() {
+  hidden = true;
+  if (chat && !chat.isDestroyed()) chat.hide();
+  if (face && !face.isDestroyed()) face.hide();
+}
+
+function comeBack() {
+  if (!hidden) return;
+  hidden = false;
+  toHost("show");                  // the host brings the menu wheel back with her
+  if (face && !face.isDestroyed()) { face.showInactive(); face.moveTop(); }
+}
+
+/** The window was closed (WM close, Ctrl+W): tell the host, then hide. */
+function closedByUser() {
+  toHost("hide");
+  goBackground();
 }
 
 // ---------------- live settings: companion.json (the dashboard's Rose tab writes it) ----------------
@@ -320,7 +528,18 @@ ipcMain.on("face:drag", (_e, phase, sx, sy) => {
 });
 
 ipcMain.on("face:click", () => toggleChat());
-ipcMain.on("face:state", (_e, s) => toHost("state", { busy: !!turn, talking: !!(s && s.talking) }));
+ipcMain.on("face:state", (_e, s) => {
+  faceTalking = !!(s && s.talking);
+  toHost("state", { busy: !!turn, talking: faceTalking });
+});
+// the face's own mic (echo-cancelled) heard the user talking over her: the host transcribes it
+ipcMain.on("face:ears", (_e, m) => {
+  if (!m || typeof m !== "object") return;
+  if (m.phase === "open") toHost("ears", { on: true });
+  else if (m.phase === "error") toHost("ears", { on: false, error: String(m.error || "").slice(0, 300) });
+  else if (m.phase === "start") toHost("barge_start");
+  else if (m.phase === "audio" && m.wav instanceof Uint8Array) voiceFromFace(Buffer.from(m.wav));
+});
 function popupMenu(win) {
   const set = (k, v, cmd) => {
     settings[k] = v;
@@ -338,6 +557,7 @@ function popupMenu(win) {
     { label: "Caveman mode (short replies)", type: "checkbox", checked: settings.caveman, click: (i) => set("caveman", i.checked) },
     { label: 'Listen for "Hey Rose" (offline)', type: "checkbox", checked: settings.wake, enabled: settings.wake_available,
       click: (i) => set("wake", i.checked, "wake") },
+    { label: "Stop talking when I talk", type: "checkbox", checked: settings.barge, click: (i) => set("barge", i.checked, "barge") },
     { label: "Menu wheel", type: "checkbox", checked: settings.wheel, click: (i) => set("wheel", i.checked, "wheel") },
     { label: "Wheel button (Super+C opens the wheel)", type: "checkbox", checked: settings.wheel_button,
       click: (i) => set("wheel_button", i.checked, "wheel_button") },
@@ -349,7 +569,8 @@ function popupMenu(win) {
     { label: "Open ROSE Desktop", enabled: fs.existsSync(DESKTOP_APP), click: () => spawn(DESKTOP_APP, [], { detached: true, stdio: "ignore" }).unref() },
     { label: "Use classic face", click: () => toHost("classic") },
     { label: "Restart Rose", click: () => toHost("restart") },
-    { label: "Hide Rose", click: () => { toHost("hide"); setTimeout(() => app.exit(0), 2500); } },
+    { label: "Hide Rose (keeps listening)", click: () => closedByUser() },
+    { label: "Quit Rose (stops listening)", click: () => { toHost("quit"); setTimeout(() => app.exit(0), 2500); } },
   ]);
   menu.popup({ window: win });
 }
@@ -433,7 +654,7 @@ ipcMain.handle("chat:files", (_e, source) => { toHost("send_files", { source: so
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => showChat(true));
+  app.on("second-instance", () => { comeBack(); showChat(true); });
   app.whenReady().then(() => {
     if (fs.existsSync(ICON)) app.dock?.setIcon?.(nativeImage.createFromPath(ICON));
     createFace();
@@ -443,5 +664,5 @@ if (!app.requestSingleInstanceLock()) {
     }
   });
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(sig, () => app.exit(0));
-  app.on("window-all-closed", () => app.quit());
+  app.on("window-all-closed", () => { /* closing her windows never quits: she waits in the background */ });
 }

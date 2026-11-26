@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("rose", {
   menu: () => ipcRenderer.send("face:menu"),
   faceState: (s) => ipcRenderer.send("face:state", s),
   tts: (text) => ipcRenderer.invoke("face:tts", text),
+  ears: (m) => ipcRenderer.send("face:ears", m),  // the mic while she talks (talking over her)
   // chat
   send: (text, voice) => ipcRenderer.invoke("chat:send", text, voice),
   approve: (callId, ok) => ipcRenderer.invoke("chat:approve", callId, ok),

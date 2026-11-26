@@ -1,4 +1,8 @@
-"""Wake word rules (the audio part is tested by hand with recorded samples)."""
+"""Wake word rules and the mic stream (the hearing itself is tested by hand with recorded samples)."""
+
+import threading
+
+import pytest
 
 from rose import wake
 
@@ -52,3 +56,125 @@ def test_record_until_quiet_gives_up_and_cancels():
     stop = threading.Event()
     stop.set()
     assert wake.record_until_quiet(lambda: bytes(3200), stop, start=b"ab") == b"ab"
+
+
+# ---------------- the mic stream: open for as long as Rose runs ----------------
+
+@pytest.fixture
+def quick_reopen(monkeypatch):
+    """Don't make the tests sit through the real back-off."""
+    monkeypatch.setattr(wake, "REOPEN_WAITS", (0.01,))
+
+
+def _mic(cmd, **kw):
+    return wake.MicStream(cmd=cmd, **kw)
+
+
+def test_mic_keeps_reading_after_the_mic_goes_away(quick_reopen):
+    """Each "parec" hands over one chunk and dies (PulseAudio restarting, a source change): the stream
+    brings it back by itself instead of going deaf."""
+    mic = _mic(["head", "-c", "3200", "/dev/zero"])
+    try:
+        assert len(mic.read(3200)) == 3200
+        assert len(mic.read(3200)) == 3200
+        assert len(mic.read(3200)) == 3200
+        assert mic.opens == 3  # three parecs for three chunks, and the audio never stopped
+    finally:
+        mic.shutdown()
+
+
+def test_mic_reports_losses_and_gives_up_only_on_shutdown(quick_reopen):
+    told = []
+    mic = _mic(["true"], on_reopen=lambda n, err: told.append(n))  # a mic that is never there
+    threading.Timer(0.3, mic.shutdown).start()
+    assert mic.read(10) == b""  # it kept trying until she was shut down
+    assert told and told[0] == 1 and mic.losses == len(told)
+    assert mic.read(10) == b"" and mic.proc is None
+
+
+def test_mic_stops_with_the_stop_event(quick_reopen):
+    stop = threading.Event()
+    stop.set()
+    mic = _mic(["head", "-c", "3200", "/dev/zero"], stop=stop)
+    assert mic.read(10) == b"" and mic.opens == 0  # already stopping: the mic is never asked for
+
+
+def test_push_to_talk_gives_up_when_there_is_no_mic(quick_reopen, monkeypatch):
+    """A whole recording can't wait forever: no mic at all ends it in seconds, with empty audio."""
+    monkeypatch.setattr(wake, "MIC_CMD", ["rose-no-such-mic-binary"])
+    wav = wake.push_to_talk(threading.Event(), max_s=20)
+    assert wav.startswith(b"RIFF") and len(wav) < 100  # a valid, empty WAV
+
+
+def test_mic_missing_binary_is_not_a_crash(quick_reopen):
+    mic = _mic(["rose-no-such-mic-binary"])
+    threading.Timer(0.2, mic.shutdown).start()
+    assert mic.read(10) == b""
+    assert mic.opens == 0 and "FileNotFoundError" in (mic.last_error or "")
+
+
+# ---- barge-in: the user talking over Rose
+
+
+def _feed(det, pairs):
+    return [det.feed(m, s) for m, s in pairs]
+
+
+def test_barge_ignores_her_own_echo():
+    det = wake.BargeDetector()
+    # she talks loudly; the mic hears her at ~0.3x through the speakers (with some wobble)
+    out = _feed(det, [(0.3 * s, s) for s in [0.2, 0.25, 0.18, 0.3, 0.22, 0.28, 0.2, 0.26, 0.24, 0.3] * 3])
+    assert not any(out)
+    assert det._echo_gain() is not None
+
+
+def test_barge_hears_the_user_over_her():
+    det = wake.BargeDetector()
+    _feed(det, [(0.3 * s, s) for s in [0.2, 0.25, 0.18, 0.3, 0.22] * 4])  # learn her echo
+    out = _feed(det, [(0.3, 0.2)] * 7)  # the user, much louder than her echo
+    assert out[-1]
+
+
+def test_barge_needs_half_a_second_of_voice():
+    det = wake.BargeDetector()
+    _feed(det, [(0.002, 0.0)] * 10)  # a quiet room, she is between sentences
+    assert not any(_feed(det, [(0.2, 0.0), (0.002, 0.0), (0.2, 0.0), (0.002, 0.0)] * 2))  # a few clicks
+    assert _feed(det, [(0.2, 0.0)] * 5)[-1]
+
+
+def test_barge_does_not_guess_before_it_knows_her_echo():
+    det = wake.BargeDetector()
+    assert not any(_feed(det, [(0.5, 0.3)] * 4))  # loud mic, loud speakers, nothing learned yet
+
+
+def test_record_until_quiet_when_already_talking():
+    import array
+
+    loud = array.array("h", [8000, -8000] * 800).tobytes()  # 0.1 s
+    quiet = bytes(3200)
+    chunks = iter([quiet] * 13 + [loud] * 50)
+    pcm = wake.record_until_quiet(lambda: next(chunks), threading.Event(), start=loud * 3, heard=True, floor=0.001)
+    assert len(pcm) == 3200 * (3 + 12)  # the start, then ~1.2 s of quiet ends it
+
+
+def test_barge_in_stops_quietly_without_a_mic(quick_reopen):
+    got = []
+    b = wake.BargeIn(on_start=lambda: got.append("start"), on_speech=got.append,
+                     mic_cmd=["/nonexistent/parec"], monitor_cmd=["/nonexistent/parec"])
+    b.start()
+    b.stop()
+    b.join(2)
+    assert not b.is_alive() and got == []
+
+
+def test_record_until_quiet_streams_each_chunk():
+    """on_chunk sees the pre-roll and every chunk as it arrives, adding up to exactly what is returned."""
+    import array
+    import threading
+
+    loud = array.array("h", [8000, -8000] * 800).tobytes()
+    chunks = iter([loud] * 3 + [bytes(3200)] * 20)
+    got: list[bytes] = []
+    pcm = wake.record_until_quiet(lambda: next(chunks, b""), threading.Event(), start=b"pre!", quiet_s=0.5,
+                                  on_chunk=got.append)
+    assert got[0] == b"pre!" and b"".join(got) == pcm

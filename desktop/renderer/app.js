@@ -1199,7 +1199,9 @@ const roseUI = (() => {
   async function load() {
     try { info = await api("rose_info", {}, { quiet: true }); } catch { return; }
     look = info.look;
-    $("roseState").textContent = info.running ? (info.ui === "tk" ? "showing (classic)" : "showing") : "hidden";
+    $("roseState").textContent = !info.running ? "stopped"
+      : info.hidden ? "listening in the background"
+      : info.ui === "tk" ? "showing (classic)" : "showing";
     $("roseState").className = "pill " + (info.running ? "ok" : "warn");
     $("roseSpeak").checked = info.speak; $("roseCaveman").checked = info.caveman;
     $("roseWake").checked = info.wake; $("roseWake").disabled = !info.wake_available;

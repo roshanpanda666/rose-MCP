@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from pathlib import Path
 
 from rose import companion, face_electron
@@ -75,6 +76,17 @@ def test_state_and_send(monkeypatch):
     assert h.proc.sent() == [{"ev": "ctx", "mood": "idle", "status": "hanging out"}]
 
 
+def test_turn_end_keeps_her_voice_talking(monkeypatch):
+    """The turn's idle message (no "talking") must not end barge-in while her voice still plays."""
+    monkeypatch.setattr(companion, "barge_wanted", lambda: False)
+    h = _host()
+    h.handle({"cmd": "state", "busy": True, "talking": True})
+    h.handle({"cmd": "state", "busy": False})
+    assert not h.busy and h.talking
+    h.handle({"cmd": "state", "busy": False, "talking": False})
+    assert not h.talking
+
+
 def test_ptt_toggle_cancels(monkeypatch):
     h = _host()
     started = []
@@ -106,6 +118,90 @@ def test_send_files_notice(monkeypatch):
     assert h.proc.sent() == [{"ev": "notice", "text": "sent clipboard", "ok": True}]
 
 
+def test_hide_keeps_her_listening_in_the_background(monkeypatch):
+    """Closing Rose's window hides both windows; the host (wake word, hotkey) stays alive."""
+    state = {"wheel": False}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    monkeypatch.setattr(companion, "stop_wheel", lambda: None)
+    h = _host()
+    h.handle({"cmd": "hide"})
+    assert h.hidden and not h.stopping and state["hidden"] is True
+    assert h.proc.sent() == [{"ev": "background"}]
+    h.handle({"cmd": "hide"})  # again: nothing new
+    assert h.proc.sent() == [{"ev": "background"}]
+    h.handle({"cmd": "show"})
+    assert not h.hidden and state["hidden"] is False
+    assert h.proc.sent()[-1] == {"ev": "show"}
+
+
+def test_apply_visibility_follows_saved_state(monkeypatch):
+    state = {"hidden": True, "wheel": False}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    monkeypatch.setattr(companion, "stop_wheel", lambda: None)
+    h = _host()
+    h.apply_visibility()  # `rose face --hide`
+    assert h.hidden
+    state["hidden"] = False
+    h.apply_visibility()  # `rose face` again
+    assert not h.hidden
+    assert [m["ev"] for m in h.proc.sent()] == ["background", "show"]
+
+
+def test_wake_and_ptt_bring_her_back(monkeypatch):
+    state = {"wheel": False}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    monkeypatch.setattr(companion, "stop_wheel", lambda: None)
+    h = _host()
+    h.handle({"cmd": "hide"})
+    h._woken()  # "Hey Rose" while she's away
+    assert not h.hidden
+    assert [m["ev"] for m in h.proc.sent()] == ["background", "show", "wake"]
+    h.handle({"cmd": "hide"})
+    monkeypatch.setattr(h, "_ptt_run", lambda stop, gen: None)
+    h.hotkey_pressed()
+    assert not h.hidden
+
+
+def test_quit_is_the_only_real_stop(monkeypatch):
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: None)
+    h = _host()
+    h.handle({"cmd": "quit"})
+    assert h.stopping and h.proc.sent()[-1] == {"ev": "quit"}
+
+
+def test_trigger_hide_and_show_signal_a_running_rose(monkeypatch):
+    import os
+    import signal
+
+    state: dict = {}
+    killed: list = []
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    monkeypatch.setattr(companion, "_running_pid", lambda: 4242)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    assert companion.trigger_hide() == 0 and state["hidden"] is True
+    assert companion.trigger_show() == 0 and state["hidden"] is False
+    assert killed == [(4242, signal.SIGUSR2), (4242, signal.SIGUSR2)]
+    monkeypatch.setattr(companion, "_running_pid", lambda: None)
+    assert companion.trigger_hide() == 1 and companion.trigger_show() == 1
+
+
+def test_electron_windows_hide_instead_of_quitting():
+    """ROSE Desktop and Rose's face keep running when their window is closed."""
+    desktop = Path(face_electron.__file__).resolve().parents[1] / "desktop"
+    if not desktop.is_dir():
+        return  # installed copy without the Electron apps
+    app = (desktop / "main.js").read_text()
+    assert 'win.on("close"' in app and "win.hide()" in app
+    assert "window-all-closed" in app and "if (!tray) app.quit()" not in app
+    face = (desktop / "face" / "main.js").read_text()
+    assert 'face.on("close"' in face and "closedByUser()" in face
+    assert 'app.on("window-all-closed", () => app.quit())' not in face
+
+
 def test_look_clean_clamps_and_drops():
     from rose import face_look
 
@@ -126,6 +222,97 @@ def test_look_save_merges(monkeypatch):
     assert look["size"] == 0.8 and look["hair_hue"] == 200 and state["look"] == look
 
 
+def _quiet_wheel(monkeypatch) -> dict:
+    """The menu wheel is a whole other Electron: never start one in a test."""
+    calls = {"start": 0, "stop": 0}
+    monkeypatch.setattr(companion, "start_wheel", lambda *a, **k: calls.update(start=calls["start"] + 1))
+    monkeypatch.setattr(companion, "stop_wheel", lambda *a, **k: calls.update(stop=calls["stop"] + 1))
+    return calls
+
+
+class _Ears:
+    """Stands in for a running WakeListener."""
+
+    def __init__(self, alive=True):
+        self.alive, self.stopped = alive, False
+
+    def is_alive(self):
+        return self.alive
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_hide_closes_her_away_but_keeps_listening(monkeypatch):
+    state = {"wheel": True}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    wheel = _quiet_wheel(monkeypatch)
+    h = _host()
+    ears = h.wake = _Ears()
+    h.handle({"cmd": "hide"})  # the window was closed
+    assert h.hidden and state["hidden"] is True
+    assert not ears.stopped and h.wake is ears  # her ears stay open: the mic is still hers
+    assert wheel["stop"] == 1 and wheel["start"] == 0
+    assert h.proc.sent()[-1] == {"ev": "background"}
+    h.handle({"cmd": "hide"})  # again: nothing more to do
+    assert wheel["stop"] == 1
+
+
+def test_show_brings_her_back_with_the_wheel(monkeypatch):
+    state = {"wheel": True, "hidden": True}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    wheel = _quiet_wheel(monkeypatch)
+    h = _host()
+    h.hidden = True
+    h.handle({"cmd": "show"})
+    assert not h.hidden and state["hidden"] is False
+    assert h.proc.sent()[-1] == {"ev": "show"}
+    for t in threading.enumerate():  # show() starts the wheel off-thread
+        if t is not threading.current_thread():
+            t.join(timeout=2)
+    assert wheel["start"] == 1
+
+
+def test_apply_visibility_follows_the_saved_choice(monkeypatch):
+    state = {"wheel": False, "hidden": True}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
+    _quiet_wheel(monkeypatch)
+    h = _host()
+    h.apply_visibility()  # `rose face --hide`
+    assert h.hidden
+    state["hidden"] = False
+    h.apply_visibility()  # `rose face` again
+    assert not h.hidden
+
+
+def test_quit_is_the_only_thing_that_stops_her(monkeypatch):
+    _quiet_wheel(monkeypatch)
+    h = _host()
+    h.handle({"cmd": "quit"})
+    assert h.stopping and h.proc.sent()[-1] == {"ev": "quit"}
+
+
+def test_wake_guard_starts_her_ears_again(monkeypatch):
+    state = {"wake": True}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    started = []
+    h = _host()
+    monkeypatch.setattr(h, "_wake_start", lambda: started.append(h.wake))
+    h.wake = _Ears(alive=True)
+    h._wake_guard()
+    assert started == []  # still listening: leave her be
+    h.wake = _Ears(alive=False)  # the thread died (a Vosk or audio error)
+    h._wake_guard()
+    assert started == [None] and h.wake is None  # cleared, then started again
+    state["wake"] = False  # she was asked not to listen: stay quiet
+    h.wake = None
+    h._wake_guard()
+    assert started == [None]
+
+
 def test_look_view_and_menu_command(monkeypatch):
     from rose import face_look
 
@@ -136,3 +323,122 @@ def test_look_view_and_menu_command(monkeypatch):
     monkeypatch.setattr(companion, "_save_state", lambda **kw: state.update(kw))
     _host().handle({"cmd": "look", "changes": {"view": "face"}})
     assert state["look"]["view"] == "face"
+
+
+def test_face_ears_replace_host_barge_in(monkeypatch):
+    """Once the face has its own echo-cancelled mic, the host doesn't start wake.BargeIn; if the face's mic
+    fails, the host's barge-in takes over again."""
+    from rose import wake
+
+    started = []
+
+    class FakeBarge:
+        triggered = False
+
+        def __init__(self, **kw):
+            started.append(self)
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(wake, "BargeIn", FakeBarge)
+    monkeypatch.setattr(companion, "barge_wanted", lambda: True)
+    monkeypatch.setattr(companion, "_log", lambda m: None)
+    h = _host()
+    h.handle({"cmd": "ears", "on": True})
+    h.handle({"cmd": "state", "busy": False, "talking": True})
+    assert started == [] and h.barge is None
+    h.handle({"cmd": "ears", "on": False, "error": "NotAllowedError"})
+    assert len(started) == 1 and h.barge is started[0]
+
+
+def test_face_barge_audio_is_transcribed(monkeypatch):
+    import base64
+
+    got = []
+    done = threading.Event()
+    monkeypatch.setattr(companion, "barge_wanted", lambda: True)
+
+    def transcribe(wav):
+        got.append(wav)
+        done.set()
+        return "Hey Rose, open the calendar"
+
+    monkeypatch.setattr(companion, "transcribe", transcribe)
+    h = _host()
+    h.face_ears = True
+    h.handle({"cmd": "barge_start"})
+    h.handle({"cmd": "barge_audio", "wav": base64.b64encode(b"RIFFdata").decode()})
+    assert done.wait(2)
+    for _ in range(50):
+        if any(m.get("ev") == "voice_cmd" for m in h.proc.sent()):
+            break
+        threading.Event().wait(0.02)
+    sent = h.proc.sent()
+    assert got == [b"RIFFdata"]
+    assert {"ev": "barge", "state": "paused"} in sent and {"ev": "barge", "state": "stop"} in sent
+    assert sent[-1]["ev"] == "voice_cmd" and "calendar" in sent[-1]["text"]
+
+
+def test_face_barge_audio_garbage_resumes_her(monkeypatch):
+    h = _host()
+    h.handle({"cmd": "barge_audio", "wav": "!!not base64!!"})
+    assert h.proc.sent() == [{"ev": "barge", "state": "resume"}]
+
+
+def test_ptt_streams_the_recording_to_the_face(monkeypatch):
+    """Push-to-talk sends voice_begin, the audio as it is recorded, then voice_end (the face transcribes)."""
+    import base64
+
+    from rose import wake
+
+    def record(stop, on_chunk=None, **kw):
+        on_chunk(b"ab")
+        on_chunk(b"cd")
+        return b"RIFF"
+
+    monkeypatch.setattr(wake, "push_to_talk", record)
+    h = _host()
+    h.ptt_gen = 1
+    h.ptt = {"stop": threading.Event(), "gen": 1}
+    h._ptt_run(h.ptt["stop"], 1)
+    sent = h.proc.sent()
+    assert [m["ev"] for m in sent] == ["voice_begin", "voice_pcm", "voice_pcm", "voice_end"]
+    assert sent[0]["source"] == "ptt" and len({m["id"] for m in sent}) == 1
+    assert b"".join(base64.b64decode(m["pcm"]) for m in sent[1:3]) == b"abcd"
+    assert sent[-1]["cancelled"] is False and h.ptt is None
+
+
+def test_ptt_cancel_drops_the_stream(monkeypatch):
+    from rose import wake
+
+    h = _host()
+    h.ptt_gen = 1
+    h.ptt = {"stop": threading.Event(), "gen": 1}
+
+    def record(stop, on_chunk=None, **kw):
+        h.hotkey_pressed()  # pressed again while talking: cancel
+        return b""
+
+    monkeypatch.setattr(wake, "push_to_talk", record)
+    h._ptt_run(h.ptt["stop"], 1)
+    assert h.proc.sent()[-1] == {"ev": "voice_end", "id": 1, "cancelled": True, "error": ""}
+
+
+def test_barge_voice_done_listens_again_only_after_a_cough(monkeypatch):
+    calls = []
+    h = _host()
+    monkeypatch.setattr(h, "_barge_follow", lambda: calls.append(1))
+
+    class _B:
+        triggered = True
+
+    h.barge = _B()
+    h.handle({"cmd": "voice_done", "source": "barge", "heard": True})
+    assert h.barge is None and calls == []  # new command: her voice stops, so no listening over her
+    h.barge = _B()
+    h.handle({"cmd": "voice_done", "source": "barge", "heard": False})
+    assert h.barge is None and calls == [1]

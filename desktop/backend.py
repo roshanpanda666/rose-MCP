@@ -142,8 +142,9 @@ def bridge_read(last: int = 40) -> list:
 
 
 def face(action: str) -> str:
-    args = {"show": [], "stop": ["--stop"], "restart": ["--restart"], "wake_on": ["--wake", "on"],
-            "wake_off": ["--wake", "off"], "talk": ["--talk"]}[action]
+    # "hide" puts her in the background (still listening); "stop" really stops her.
+    args = {"show": [], "hide": ["--hide"], "stop": ["--stop"], "restart": ["--restart"],
+            "wake_on": ["--wake", "on"], "wake_off": ["--wake", "off"], "talk": ["--talk"]}[action]
     _detach("rose", "face", *args)
     return "OK"
 
@@ -973,6 +974,7 @@ def rose_info() -> dict:
             "wake": bool(st.get("wake", True)) and wake_ok, "wake_available": wake_ok,
             "ui": st.get("face_ui", "electron"), "electron_available": face_electron.launcher() is not None,
             "running": companion._running_pid() is not None, "hotkey": companion.hotkey_spec(),
+            "hidden": bool(st.get("hidden")),  # running but closed away: no windows, still listening
             "avatar": (assets / "rose_avatar.svg").read_text(), "body": (assets / "rose_body.svg").read_text(),
             "views": list(face_look.VIEWS)}
 

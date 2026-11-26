@@ -338,6 +338,23 @@ window.rose.onHost((msg) => {
       }
       break;
     case "wake": ptt("listening", "Hey! I'm listening…"); break;
+    case "barge":  // the user talked over her
+      if (msg.state === "paused") ptt("listening", "Listening… (I paused)");
+      else if (msg.state === "transcribing") ptt("transcribing", "Got it, transcribing…");
+      else if (msg.state === "resume") ptt(null);
+      break;
+    case "voice_heard":  // a voice turn (push-to-talk, "Hey Rose", talking over her): what Whisper heard
+      ptt(null);
+      if (msg.cancelled) break;
+      if (msg.error) { if (msg.source !== "barge") addNote(msg.error); break; }
+      if (msg.stop) { addNote("Okay, I'll stop."); break; }
+      if (!msg.text) {
+        if (msg.source === "ptt") addNote("I didn't catch anything. Try again?");
+        else if (msg.source === "wake") addNote("Yes? I didn't catch that. Say \"Hey Rose\" again.");
+        break;
+      }
+      if (msg.busy) { input.value = msg.text; autosize(); refreshSend(); addNote("Still on the last one: your words are in the box. Press Enter when I'm done."); }
+      break;
     case "voice_cmd":
       ptt(null);
       if (msg.text) send(msg.text, true);
