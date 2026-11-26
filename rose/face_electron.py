@@ -54,7 +54,7 @@ def parse_command(line: str) -> dict | None:
     return msg if isinstance(msg, dict) and isinstance(msg.get("cmd"), str) else None
 
 
-STATE_KEYS = {"speak", "caveman", "face_pos", "chat_pos", "chat_size", "fresh", "conversation_id"}
+STATE_KEYS = {"speak", "mute", "caveman", "face_pos", "chat_pos", "chat_size", "fresh", "conversation_id"}
 
 
 class Host:
@@ -127,7 +127,8 @@ class Host:
         if st.get("wheel", True):
             threading.Timer(0.8, comp.start_wheel).start()
         self.send("init", state={k: st.get(k) for k in STATE_KEYS | {"wake", "wheel"}},
-                  speak=bool(st.get("speak", False)), caveman=bool(st.get("caveman", True)),
+                  speak=bool(st.get("speak", False)), mute=bool(st.get("mute", False)),
+                  caveman=bool(st.get("caveman", True)),
                   wake=bool(st.get("wake", True)) and self._wake_available(), wake_available=self._wake_available(),
                   wheel=bool(st.get("wheel", True)), wheel_button=comp.wheel_button_shown(),
                   barge=comp.barge_wanted(),
@@ -211,8 +212,8 @@ class Host:
             self._barge_follow()
         elif cmd == "save":  # remember settings/positions (companion.json, shared with the classic face)
             kw = {k: v for k, v in (msg.get("values") or {}).items() if k in STATE_KEYS}
-            if kw:
-                comp._save_state(**kw)
+            if kw:  # synced: the value came from rose-phone (the phone changed it), so don't post it back
+                comp._save_state(_push=not msg.get("synced"), **kw)
         elif cmd == "ptt":
             self.hotkey_pressed(open_chat=False)
         elif cmd == "wake":

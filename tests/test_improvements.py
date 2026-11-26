@@ -14,7 +14,7 @@ from mcp.server.mcpserver import MCPServer
 from rose import agenda, failures, phonecheck, proactive, profiles, selftest, server
 from rose.common import ToolError
 
-ALL = [fn.__name__ for fn, _ in server._tool_table()]
+ALL = [fn.__name__ for fn, _ in server._tool_table(include_optional=True)]
 
 
 # ---------------- profiles ----------------
@@ -28,7 +28,7 @@ def _server():
 def test_full_profile_is_default_and_lists_everything(monkeypatch):
     monkeypatch.delenv("ROSE_PROFILE", raising=False)
     names = [t.name for t in asyncio.run(_server().list_tools())]
-    assert names == ALL
+    assert names == [fn.__name__ for fn, _ in server._tool_table()]  # flagged tools only when switched on
 
 
 @pytest.mark.parametrize("prof", ["dev", "phone", "desktop"])

@@ -59,6 +59,8 @@ def test_no_enter_when_tab_not_confirmed(vs, monkeypatch):
 def test_folder_from_title():
     assert handoff._folder_of("Claude Code - rose-MCP - Visual Studio Code") == "rose-MCP"
     assert handoff._folder_of("Visual Studio Code") == ""
+    assert handoff._folder_of("rose-MCP - Visual Studio Code") == "rose-MCP"
+    assert handoff._folder_of("YouTube Music - Brave") == ""
     assert Path  # noqa
 
 

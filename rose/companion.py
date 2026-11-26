@@ -206,10 +206,49 @@ def _state() -> dict:
         return {}
 
 
-def _save_state(**kw) -> None:
-    s = {**_state(), **kw}
+def _save_state(_push: bool = True, **kw) -> None:
+    old = _state()
+    s = {**old, **kw}
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(s))
+    if _push and "caveman" in kw and bool(kw["caveman"]) != bool(old.get("caveman", True)):
+        threading.Thread(target=push_caveman, daemon=True).start()
+
+
+_cave_lock = threading.Lock()
+
+
+def push_caveman() -> None:
+    """Caveman mode is ONE switch for every Rose app: post the desktop's value to rose-phone, which keeps it,
+    uses it for every turn (phone widget too) and tells the open apps. Sends the latest value, one at a time."""
+    base, token = _backend()
+    if not token:
+        return
+    with _cave_lock:
+        body = {"on": bool(_state().get("caveman", True)), "client": "desktop"}
+        req = urllib.request.Request(f"{base}/api/caveman", data=json.dumps(body).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=5).read()
+        except (OSError, ValueError):
+            pass  # rose-phone down: the next pull (face start, dashboard) shares ours if it has none
+
+
+def pull_caveman() -> None:
+    """Take rose-phone's shared caveman value into companion.json (the phone may have changed it)."""
+    base, token = _backend()
+    if not token:
+        return
+    req = urllib.request.Request(f"{base}/api/caveman", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            on = json.loads(resp.read()).get("on")
+    except (OSError, ValueError):
+        return
+    if on is None:
+        push_caveman()  # first app to sync: share ours
+    elif bool(on) != bool(_state().get("caveman", True)):
+        _save_state(_push=False, caveman=bool(on))
 
 
 def _backend() -> tuple[str, str]:
@@ -228,8 +267,8 @@ def chat(text: str, events: queue.Queue) -> None:
     st = _state()
     # One conversation everywhere: continue the shared thread (the phone follows), unless "New conversation".
     fresh = st.get("fresh", False)
-    body = {"message": text, "conversation_id": None, "continue_current": not fresh, "client": "desktop",
-            "caveman": st.get("caveman", True)}
+    # caveman: left out, so rose-phone's shared switch decides (pulled into companion.json for the menu)
+    body = {"message": text, "conversation_id": None, "continue_current": not fresh, "client": "desktop"}
     if fresh:
         _save_state(fresh=False)
     req = urllib.request.Request(f"{base}/api/chat", data=json.dumps(body).encode(), method="POST",

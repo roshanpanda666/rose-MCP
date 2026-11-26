@@ -54,9 +54,11 @@ def _vscode_windows() -> list[dict]:
 
 
 def _folder_of(title: str) -> str:
-    """'<tab> - rose-MCP - Visual Studio Code' -> 'rose-MCP'."""
+    """'<tab> - rose-MCP - Visual Studio Code' -> 'rose-MCP'; 'rose-MCP - Visual Studio Code' (no tab open) too."""
     parts = title.rsplit(" - ", 2)
-    return parts[-2] if len(parts) == 3 else ""
+    if len(parts) < 2 or parts[-1] != "Visual Studio Code":
+        return ""
+    return parts[-2].strip()
 
 
 def _active_title() -> str:
@@ -271,19 +273,19 @@ def _focus_claude_input(task: str) -> bool:
     return True
 
 
-def _press_enter_until_submitted(folder: Path, task: str, since: float, tries: int = 6,
+def _press_enter_until_submitted(folder: Path, task: str, since: float, tries: int = 9,
                                  win_id: str = "") -> bool | None:
     """The webview fills and focuses its input a variable moment after the tab shows, so one early Enter can land
     nowhere. Before every Enter: bring the right VS Code window back to the front and click into the Claude input box.
     Press Enter, wait for the submit hook, retry. A repeat Enter after a successful send hits an empty
     input and does nothing. True: sent (confirmed by the hook, or hooks absent and Enter pressed);
     False: pressed but never confirmed; None: the window couldn't be focused before any press."""
-    time.sleep(1.5)
+    time.sleep(0.5)  # the loop below re-checks (OCR) until the box shows the task, so no long blind wait
     for i in range(tries):
         if not _focus_target(folder, win_id):
             return None if i == 0 else False
         if not _focus_claude_input(task):  # prompt box not on screen yet: look again, never Enter blind
-            time.sleep(1)
+            time.sleep(0.5)
             continue
         if not _focus_target(folder, win_id):  # the click must not have moved us to another window
             return None if i == 0 else False

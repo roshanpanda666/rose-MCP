@@ -49,6 +49,12 @@ DEFAULT_CONFIG = {
     "approval_mode": "passphrase",
     "approval_required_tools": ["webcam_capture"],
     "approval_grant_minutes": 60,
+    "fingerprint_window_minutes": 5,
+    "fingerprint_fresh_tools": ["phone_call", "phone_message", "phone_call_control", "webcam_capture",
+                                "webcam_live_stream", "phone_photo", "phone_mic_record", "mic_live_start"],
+    "fingerprint_gate_local": False,
+    "fingerprint_exempt_clients": [],
+    "notify_every_call": True,
     "ntfy_server": "https://ntfy.sh",
     "ntfy_topic": "",
     "push_enabled": True,
@@ -94,11 +100,19 @@ DEFAULT_CONFIG = {
     "agenda_email_limit": 15,
     "client_profiles": {},
     "tool_profiles": {},
+    "browser_port": 9223,
+    "agent_browser_enabled": False,
+    "agent_browser_target": "brave",
+    "agent_browser_binary": "",
 }
 
 _COMMENTS = {
     "default_profile": 'Tool profile for clients not listed in client_profiles: "full" (every tool), "dev", "phone" or "desktop" (see rose/profiles.py; `rose profiles` shows counts)',
     "client_profiles": 'Tool profile per client label (labels from `rose auth list`), e.g. "Phone app" = "phone"',
+    "browser_port": "DevTools port for ROSE's own browser (browser_*; 127.0.0.1 only). Not 9222: Brave/Chrome use that when you allow remote debugging",
+    "agent_browser_enabled": "Offer the agent_browser_* tools (Vercel agent-browser: accessibility-tree snapshots with @eN refs). Needs `npm install -g agent-browser`",
+    "agent_browser_target": 'Browser agent-browser attaches to (127.0.0.1 only, never launched): "brave"/"chrome"/"chromium" = your running browser after turning on brave://inspect/#remote-debugging; "rose" = ROSE\'s own browser; or a port number',
+    "agent_browser_binary": 'Path to the agent-browser CLI ("" = find it on PATH)',
     "tool_profiles": 'Extra or replaced tool profiles: name = [tool names or globs like "phone_*"]',
     "proactive_enabled": "Rose speaks up on her own: upcoming meetings, failed CI runs, low battery (laptop and phone), break reminders",
     "proactive_speak": "Say proactive alerts out loud on the laptop too (never during quiet_hours)",
@@ -130,7 +144,14 @@ _COMMENTS = {
     "forge_max_running": "Forge jobs allowed at the same time",
     "forge_max_per_hour": "Forge jobs allowed per hour",
     "approval_mode": ('"passphrase": remote risky actions need an approval link + your passphrase '
-                      '(recommended). "chat": confirm=true in chat is enough'),
+                      '(recommended). "chat": confirm=true in chat is enough. "fingerprint": every remote call '
+                      'needs your phone\'s fingerprint (passkey; turn on with `rose fingerprint enable`). '
+                      'Unknown values act like "passphrase"'),
+    "fingerprint_window_minutes": "Fingerprint mode: after a fingerprint, that client may run non-sensitive tools for this many minutes (1-10) until your phone locks",
+    "fingerprint_fresh_tools": "Fingerprint mode: tools that always need a fresh fingerprint (calls, messages, camera, mic)",
+    "fingerprint_gate_local": "Fingerprint mode: also gate local Claude Code (Forge)",
+    "fingerprint_exempt_clients": "Fingerprint mode: client labels that keep the passphrase rules instead (labels from `rose auth list`)",
+    "notify_every_call": "Fingerprint mode: push every executed remote tool call to the phone (batched every 10 s)",
     "approval_required_tools": "Tools that always need an approval link when used remotely",
     "approval_grant_minutes": "After you approve once, that client can act without asking again for this many minutes (0 = ask every time)",
     "ntfy_server": "Push server for phone notifications (ntfy)",

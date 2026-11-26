@@ -270,7 +270,34 @@ def ui_fill(window: str, element: str, text: str) -> str:
     return f"Typed into {out['focused_for_typing']}." + _verify_value(back, text)
 
 
+# GNOME 48's shell loads libatk-bridge whenever toolkit-accessibility is on, and that bridge has a
+# use-after-free (g_object_unref from libatk-bridge) that segfaults gnome-shell; on X11 the session dies
+# ("Oh no! Something has gone wrong"). NO_AT_BRIDGE=1 in the shell's unit keeps the shell's bridge off while
+# apps keep theirs, so ui_* still works. It applies from the next login.
+SHELL_DROPIN = Path.home() / ".config/systemd/user/org.gnome.Shell@x11.service.d/rose-no-at-bridge.conf"
+SHELL_DROPIN_TEXT = """# Added by ROSE: keep gnome-shell's own accessibility bridge off (it crashes the shell on GNOME 48).
+# Apps keep their own bridges. Remove this file to undo (takes effect at next login).
+[Service]
+Environment=NO_AT_BRIDGE=1
+"""
+
+
+def ensure_shell_bridge_off() -> bool:
+    """Write the drop-in (once). True if it was added now, i.e. a log out and back in is needed."""
+    if SHELL_DROPIN.exists():
+        return False
+    SHELL_DROPIN.parent.mkdir(parents=True, exist_ok=True)
+    SHELL_DROPIN.write_text(SHELL_DROPIN_TEXT)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, timeout=10)
+    return True
+
+
 def ui_enable_app_accessibility(enabled: bool = True) -> str:
     """Expose Chromium/Electron app UIs (VS Code, Brave, Slack) to ui_*; app restart needed."""
+    added = ensure_shell_bridge_off() if enabled else False
     run(["gsettings", "set", "org.gnome.desktop.interface", "toolkit-accessibility", "true" if enabled else "false"])
-    return f"App accessibility {'on' if enabled else 'off'}; restart the app for it to apply."
+    msg = f"App accessibility {'on' if enabled else 'off'}; restart the app for it to apply."
+    if added:
+        msg += (" Also turned off gnome-shell's own accessibility bridge (it crashes the session on GNOME 48); "
+                "log out and back in once for that to apply.")
+    return msg

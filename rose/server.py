@@ -29,7 +29,7 @@ from rose import activity, triggers, watch  # noqa: E402
 from rose.common import logged  # noqa: E402
 from rose.config import load_config  # noqa: E402
 from rose.tools import (  # noqa: E402
-    apps, bridge, browser, clipboard, device, files, forge, freellm, github, input, motion, notify, phone, pointer, power, projects, handoff, dev, memory, phone_actions, phone_control, phone_guard, routines, undo,
+    agent_browser, apps, bridge, browser, clipboard, device, files, forge, freellm, github, input, motion, notify, phone, pointer, power, projects, handoff, dev, memory, phone_actions, phone_control, phone_guard, routines, undo,
     quick, recorder, screenshot, system, ui, webcam, docker, organize, packages, phone_files,
 )
 
@@ -107,8 +107,30 @@ def list_monitors() -> list[dict]:
     return screenshot.monitors()
 
 
-def _tool_table() -> list[tuple[Callable, ToolAnnotations]]:
-    """Every tool, in registration order. Keep the order stable: clients cache the tool list."""
+def _optional_tools() -> list[tuple[Callable, ToolAnnotations]]:
+    """Tools behind a config flag (off by default): agent-browser (agent_browser_enabled)."""
+    return [
+        (agent_browser.agent_browser_status, READ_ONLY),
+        (agent_browser.agent_browser_open, OPEN_WRITE),
+        (agent_browser.agent_browser_snapshot, OPEN_READ),
+        (agent_browser.agent_browser_click, OPEN_WRITE),
+        (agent_browser.agent_browser_fill, OPEN_WRITE),
+        (agent_browser.agent_browser_press, OPEN_WRITE),
+        (agent_browser.agent_browser_read, OPEN_READ),
+        (agent_browser.agent_browser_wait, READ_ONLY),
+        (agent_browser.agent_browser_close, WRITES),
+    ]
+
+
+def _tool_table(include_optional: bool | None = None) -> list[tuple[Callable, ToolAnnotations]]:
+    """Every tool, in registration order. Keep the order stable: clients cache the tool list.
+    Flagged tools come last (include_optional=None follows their config flags)."""
+    if include_optional is None:
+        include_optional = agent_browser.enabled()
+    return _core_tools() + (_optional_tools() if include_optional else [])
+
+
+def _core_tools() -> list[tuple[Callable, ToolAnnotations]]:
     return [
         (guard.check_approval, READ_ONLY),
         (clipboard.clipboard_read, READ_ONLY),
@@ -335,7 +357,7 @@ def build_http_server(public_url: str) -> MCPServer:  # noqa: C901 (route defini
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, RedirectResponse
 
-    from rose import auth
+    from rose import auth, fingerprint
 
     if not auth.auth_configured():
         sys.exit(
@@ -403,6 +425,9 @@ def build_http_server(public_url: str) -> MCPServer:  # noqa: C901 (route defini
         if not rec or rec["status"] != "pending":
             return HTMLResponse(auth.approval_page(None, f"This approval is {rec['status'] if rec else 'unknown'}."),
                                 404, headers=no_frame)
+        if rec.get("mode") == "fingerprint":  # passkey page (its own CSP allows only its inline script)
+            page, nonce = fingerprint.approval_page(rec)
+            return HTMLResponse(page, headers=fingerprint.headers(nonce))
         return HTMLResponse(auth.approval_page(rec), headers=no_frame)
 
     @mcp.custom_route(guard.APPROVE_PATH, methods=["POST"], include_in_schema=False)
@@ -418,11 +443,16 @@ def build_http_server(public_url: str) -> MCPServer:  # noqa: C901 (route defini
         except LookupError as e:
             return HTMLResponse(auth.approval_page(None, str(e)), 400, headers=no_frame)
         except PermissionError as e:
-            return HTMLResponse(auth.approval_page(guard.load_approval(aid), str(e)), 401, headers=no_frame)
+            rec = guard.load_approval(aid)
+            if rec and rec.get("mode") == "fingerprint":
+                page, nonce = fingerprint.approval_page(rec, str(e))
+                return HTMLResponse(page, 401, headers=fingerprint.headers(nonce))
+            return HTMLResponse(auth.approval_page(rec, str(e)), 401, headers=no_frame)
         msg = "Approved and done. You can go back to Claude." if rec["status"] == "done" else \
             f"Approved, but the action failed: {rec.get('result', '')[:300]}"
         return HTMLResponse(auth.approval_page(None, msg), headers=no_frame)
 
+    fingerprint.add_routes(mcp)  # passkey approvals, laptop fallback, passkey registration
     return mcp
 
 

@@ -5,8 +5,11 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const ctl = $("ctl"), muteBtn = $("muteBtn"), micBtn = $("micBtn"), closeBtn = $("closeBtn");
+const card = $("card"), lineEl = $("line"), statusEl = $("status");
 const roseBox = $("rose"), svgBox = $("svgbox"), fx = $("fx"), bubble = $("bubble"), bubbleText = bubble.querySelector(".b-text");
 const NS = "http://www.w3.org/2000/svg";
+const CARD = true;   // the desktop widget is a card like the phone's; Rose is its avatar
 
 const MOODS = {
   idle: { brow: [0, 0], eye: "normal", open: 1, mouth: "smile", extra: null, gaze: null, bob: 0, glow: null },
@@ -130,73 +133,42 @@ async function load() {
   setTimeout(computeShape, 150);
 }
 
-// ---------------- window shape: her outline (+ hop room, bubble, a strip above her head for particles) ----------
-let silhouette = [];
-async function computeShape() {
-  try {
-    const W = roseBox.offsetWidth, H = roseBox.offsetHeight;
-    const copy = svg.cloneNode(true);
-    copy.setAttribute("width", W); copy.setAttribute("height", H);
-    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(copy)], { type: "image/svg+xml" }));
-    const img = new Image();
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-    const c = document.createElement("canvas"); c.width = W; c.height = H;
-    const cx = c.getContext("2d"); cx.drawImage(img, 0, 0, W, H);
-    URL.revokeObjectURL(url);
-    const a = cx.getImageData(0, 0, W, H).data, BAND = 4, rows = [];
-    for (let y = 0; y < H; y += BAND) {
-      let x0 = W, x1 = -1;
-      for (let yy = y; yy < Math.min(H, y + BAND); yy++) {
-        for (let x = 0; x < W; x++) if (a[(yy * W + x) * 4 + 3] > 60) { if (x < x0) x0 = x; if (x > x1) x1 = x; }
-      }
-      rows.push(x1 >= 0 ? [x0, x1] : null);
-    }
-    // she hops up to ~26 px: each band covers its resting place and its place mid-hop (28 px higher)
-    const L = roseBox.offsetLeft, T = roseBox.offsetTop, HOP = 28;
-    silhouette = [];
-    rows.forEach((r, i) => {
-      if (r) silhouette.push({ x: L + r[0] - 2, y: T + i * BAND - HOP, width: r[1] - r[0] + 5, height: BAND + HOP });
-    });
-    silhouette.push({ x: L + 10, y: T - 58, width: W - 20, height: 32 }); // particles over her head
-    pushShape();
-  } catch (e) {
-    console.error("shape: " + e);
-    const r = roseBox.getBoundingClientRect();
-    silhouette = [{ x: r.left, y: r.top - 28, width: r.width, height: r.height + 28 }];
-    pushShape();
-  }
-}
+// ---------------- window shape: the card (computeShape kept as the name the rest of the file uses) ----------
+const computeShape = () => pushShape();
 function pushShape() {
-  const rects = [...silhouette];
-  if (!bubble.hidden) {
-    const r = bubbleText.getBoundingClientRect();
-    rects.push({ x: r.left - 2, y: r.top - 2, width: r.width + 4, height: r.height + 12 });
+  // the card is the clickable area; rounded corners are cut in bands so the transparent corners click through
+  const r = card.getBoundingClientRect(), R = 22, rects = [];
+  for (let y = 0; y < R; y += 2) {
+    const dx = R - Math.sqrt(R * R - (R - y - 1) * (R - y - 1));
+    rects.push({ x: r.left + dx, y: r.top + y, width: r.width - 2 * dx, height: 2 });
+    rects.push({ x: r.left + dx, y: r.bottom - y - 2, width: r.width - 2 * dx, height: 2 });
   }
+  rects.push({ x: r.left, y: r.top + R, width: r.width, height: r.height - 2 * R });
   window.rose.shape(rects);
 }
 
 // ---------------- speech bubble ----------------
-let bubbleTimer = 0, bubbleKind = "";
+// In the card, what the bubble used to show goes on the card's line. A reply stays as the line (like the
+// phone widget's "Rose: …"); news and alerts show for a while, then the last line comes back.
+let bubbleTimer = 0, bubbleKind = "", restLine = "Face: open the chat. Here: talk.";
+function setLine(text, alert = false) {
+  if (lineEl.textContent !== text) lineEl.textContent = text;
+  lineEl.classList.toggle("alert", alert);
+}
 function say(text, secs = 6, kind = "news") {
-  if (!L.bubble && kind !== "alert") return;
   text = String(text || "").trim();
   if (!text) return hideBubble();
-  const changed = bubble.hidden || bubbleText.textContent !== text;
-  bubbleText.textContent = text;
-  bubble.classList.toggle("alert", kind === "alert");
+  if (kind === "reply") { restLine = text; clearTimeout(bubbleTimer); bubbleKind = "reply"; setLine(text); return; }
+  setLine(text, kind === "alert");
   bubbleKind = kind;
-  if (bubble.hidden) { bubble.hidden = false; }
-  if (changed) requestAnimationFrame(pushShape);
   clearTimeout(bubbleTimer);
   if (secs) bubbleTimer = setTimeout(hideBubble, secs * 1000);
 }
 function hideBubble() {
   clearTimeout(bubbleTimer);
-  if (bubble.hidden) return;
-  bubble.hidden = true; bubbleKind = "";
-  pushShape();
+  bubbleKind = "";
+  setLine(restLine);
 }
-bubbleText.addEventListener("click", () => { hideBubble(); window.rose.click(); });
 
 // ---------------- voice (her real voice, lip-synced) ----------------
 // A reply is spoken while it streams in: each finished sentence goes to /api/tts at once (the first one as
@@ -410,7 +382,7 @@ const ears = (() => {
 })();
 let bargeOn = true;
 function earsFollow() {
-  const answering = S.busy && (speakOn || voiceTurn);
+  const answering = S.busy && !muted && (speakOn || voiceTurn);
   if (bargeOn && (answering || voice.speaking())) ears.open(); else ears.closeSoon();
 }
 
@@ -425,7 +397,7 @@ function sysState() {
   return null;
 }
 function activeProp(now) {
-  if (!L.props || L.view === "face") return null;
+  if (!L.props || CARD) return null;   // too small for props in the card
   const t = S.tool;
   if (t && (!t.done || now - t.done < 2600)) return propFor(t.name);
   if (S.ptt === "listening") return "headphones";
@@ -482,8 +454,7 @@ function frame(now) {
   // body: breathing bob; a hop when she has news
   const bob = (m.bob ? m.bob * Math.sin(t * 2 * Math.PI * 1.6) : 0.8 * Math.sin(t * 1.3)) * L.bob;
   g.head.setAttribute("transform", `translate(0 ${bob.toFixed(2)})`);
-  const hp = L.hop ? (now - S.jumpAt) / 550 : -1;
-  roseBox.style.setProperty("--lift", (hp >= 0 && hp < 1 ? -Math.sin(Math.PI * hp) * 24 : 0).toFixed(1) + "px");
+  cardState(now);
   for (const s of ["L", "R"]) {
     const e = g[s], happy = m.eye === "happy";
     const open = (wink && s === "R" && !happy) ? 0.06 : m.open * blink;
@@ -542,10 +513,11 @@ function frame(now) {
   if (L.particles && rate && Math.random() < rate && fx.querySelectorAll(".p").length < 6) {
     particle(m.extra, m.extra === "notes" ? "♪♫♬"[Math.floor(Math.random() * 3)] : m.extra === "z" ? "z" : m.extra === "hearts" ? "♥" : "✦");
   }
-  // her reply in the bubble while the chat is closed
-  if (L.bubble && !S.chatOpen && (S.busy || now - S.lastDelta < 4000) && bubbleKind !== "alert") {
+  // her reply on the card's line (the tail while it streams in)
+  if ((S.busy || now - S.lastDelta < 4000) && bubbleKind !== "alert" && bubbleKind !== "news") {
     const txt = S.reply.replace(/\s+/g, " ").trim();
-    say(S.busy && !txt ? (S.tool && !S.tool.done ? `using ${S.tool.name}…` : "…") : txt.length > 150 ? "…" + txt.slice(-150) : txt, 6, "reply");
+    if (S.busy && !txt) setLine(S.tool && !S.tool.done ? `Using ${S.tool.name}…` : "…");
+    else if (txt) say("Rose: " + (txt.length > 110 ? "…" + txt.slice(-110) : txt), 0, "reply");
   }
 }
 function particle(kind, ch) {
@@ -561,7 +533,7 @@ function jump() { S.jumpAt = performance.now(); }
 // ---------------- look: size, colours (look.js), animation switches ----------------
 function applyView() {
   if (!svg) return;
-  const v = L.view in VIEWS ? L.view : "bust";
+  const v = "face";   // the card's avatar: her head only
   svg.setAttribute("viewBox", VIEWS[v].box);
   show(g.full, v === "full");
   show(g.bodyAll, v !== "face");
@@ -570,11 +542,25 @@ function applyView() {
 }
 function layout() {
   applyView();
-  const w = Math.round(view().w * L.size), h = Math.round(view().h * L.size);
-  const left = Math.round((winSize.w - w) / 2), top = winSize.h - h - 4;
-  Object.assign(roseBox.style, { width: w + "px", height: h + "px", left: left + "px", top: top + "px" });
-  bubble.style.bottom = (winSize.h - top - 4) + "px";
-  if (svg) setTimeout(computeShape, 60);
+  requestAnimationFrame(pushShape);
+}
+
+// ---------------- the card's state: border colour, running light, status (same as the phone widget) ----------------
+let errorAt = -1e9, cardKey = "";
+const STATUS = { idle: "Click to talk", listening: "Listening… click to stop", thinking: "Thinking…",
+  speaking: "Speaking", error: "Problem · click to retry" };
+function cardState(now) {
+  let st = "idle";
+  if (S.ptt === "listening" || now < S.listenUntil) st = "listening";
+  else if (voice.speaking() || (S.busy && now - S.lastDelta < 900)) st = "speaking";
+  else if (S.ptt === "transcribing" || S.busy) st = "thinking";
+  else if (now - errorAt < 8000) st = "error";
+  const label = muted && st === "idle" ? "Click to talk · muted" : STATUS[st];
+  const key = st + label;
+  if (key === cardKey) return;
+  cardKey = key;
+  card.className = "card " + st + (card.classList.contains("dragging") ? " dragging" : "");
+  statusEl.textContent = label;
 }
 function setLook(look, win) {
   const sized = look.size !== L.size || (look.view && look.view !== L.view) || (win && (win.w !== winSize.w || win.h !== winSize.h));
@@ -593,35 +579,65 @@ function recolor(hue) {
 }
 
 // ---------------- input: click = chat, drag = move, right-click = menu ----------------
+// Card: click = talk (like a tap on the phone widget), Rose's face = the chat, drag anywhere = move.
 let press = null;
-roseBox.addEventListener("pointerdown", (e) => {
+card.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
-  press = { id: e.pointerId, sx: e.screenX, sy: e.screenY, on: false };
-  roseBox.setPointerCapture(e.pointerId);
+  press = { id: e.pointerId, sx: e.screenX, sy: e.screenY, on: false, face: roseBox.contains(e.target) };
+  card.setPointerCapture(e.pointerId);
 });
-roseBox.addEventListener("pointermove", (e) => {
+card.addEventListener("pointermove", (e) => {
   if (!press || e.pointerId !== press.id) return;
   if (!press.on) {
     if (Math.hypot(e.screenX - press.sx, e.screenY - press.sy) < 5) return;
-    press.on = true; roseBox.classList.add("dragging");
+    press.on = true; card.classList.add("dragging");
     window.rose.drag("start", press.sx, press.sy);
   }
   window.rose.drag("move", e.screenX, e.screenY);
 });
-roseBox.addEventListener("pointerup", (e) => {
+card.addEventListener("pointerup", (e) => {
   if (!press || e.pointerId !== press.id) return;
-  const was = press.on;
-  press = null; roseBox.classList.remove("dragging");
+  const { on: was, face } = press;
+  press = null; card.classList.remove("dragging");
   if (was) { window.rose.drag("end", e.screenX, e.screenY); return; }
-  S.giggleUntil = performance.now() + 900; jump();
   if (bubbleKind === "news" || bubbleKind === "alert") hideBubble();
-  window.rose.click();
+  if (face) { S.giggleUntil = performance.now() + 900; window.rose.click(); }
+  else window.rose.ptt();
 });
-roseBox.addEventListener("contextmenu", (e) => { e.preventDefault(); window.rose.menu(); });
+card.addEventListener("contextmenu", (e) => { e.preventDefault(); window.rose.menu(); });
 
 // ---------------- events ----------------
 const LOVE = /\b(thanks?|thank you|thx|ty|love (you|u|it)|good (girl|job)|well done|awesome|amazing|nice one)\b|❤|♥/i;
-let speakOn = false, voiceTurn = false, prevSys = null;
+let speakOn = false, voiceTurn = false, prevSys = null, muted = false;
+
+// ---------------- mute + mic buttons ----------------
+const ICON = {
+  speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>',
+  muted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m16 9 6 6"/><path d="m22 9-6 6"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>',
+  close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12"/><path d="M18 6 6 18"/></svg>',
+  micOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="m3 3 18 18"/></svg>',
+};
+function showControls(s) {
+  muteBtn.innerHTML = muted ? ICON.muted : ICON.speaker;
+  muteBtn.classList.toggle("off", muted);
+  muteBtn.setAttribute("aria-pressed", String(muted));
+  muteBtn.title = muted ? "Muted: Rose stays silent (click to unmute)" : "Mute Rose";
+  const mic = !!(s.wake || s.barge);
+  micBtn.innerHTML = mic ? ICON.mic : ICON.micOff;
+  micBtn.classList.toggle("off", !mic);
+  micBtn.setAttribute("aria-pressed", String(mic));
+  micBtn.title = mic ? 'Mic on: "Hey Rose" and talking over her (click to turn off)'
+    : "Mic off: she only listens when you press talk (click to turn on)";
+}
+closeBtn.innerHTML = ICON.close;
+for (const [b, what] of [[muteBtn, "mute"], [micBtn, "mic"], [closeBtn, "close"]]) {
+  b.addEventListener("pointerdown", (e) => e.stopPropagation());
+  b.addEventListener("pointerup", (e) => e.stopPropagation());
+  b.addEventListener("click", (e) => { e.stopPropagation(); window.rose.toggle(what); });
+  b.addEventListener("contextmenu", (e) => { e.preventDefault(); window.rose.menu(); });
+}
+showControls({ wake: false, barge: true });
 
 window.rose.onCursor((p) => {
   if (!ptr || Math.abs(p.x - ptr.x) + Math.abs(p.y - ptr.y) > 1) ptrMovedAt = performance.now();
@@ -631,8 +647,11 @@ window.rose.onJump(jump);
 window.rose.onLook(({ look, win }) => setLook(look || {}, win));
 window.rose.onSettings((s) => {
   const was = speakOn;
-  speakOn = !!s.speak; bargeOn = s.barge !== false;
+  const wasMuted = muted;
+  speakOn = !!s.speak; bargeOn = s.barge !== false; muted = !!s.mute;
   if (was && !speakOn && !voiceTurn) voice.stop(); // "Speak replies" switched off mid-reply: quiet now
+  if (muted && !wasMuted) voice.stop();             // muted: quiet now, even in a voice turn
+  showControls(s);
   earsFollow();
 });
 window.rose.onChatVisible((v) => { S.chatOpen = v; if (v && bubbleKind === "reply") hideBubble(); });
@@ -642,11 +661,13 @@ window.rose.onHush(() => voice.stop());
 window.rose.onNewChat(() => { S.reply = ""; });
 window.rose.onTurn(({ busy }) => {
   S.busy = busy;
-  if (busy) { S.reply = ""; voice.stop(); if (speakOn || voiceTurn) voice.begin(); }
+  if (busy) { S.reply = ""; voice.stop(); if (!muted && (speakOn || voiceTurn)) voice.begin(); }
   earsFollow();
 });
 window.rose.onUserMsg(({ text, voice: spoken }) => {
   voiceTurn = !!spoken;
+  restLine = "You: " + String(text || "").replace(/\s+/g, " ").slice(0, 120);
+  if (bubbleKind !== "alert") hideBubble();
   earsFollow();
   if (LOVE.test(text)) S.loveAt = performance.now();
 });
@@ -663,7 +684,7 @@ window.rose.onChatEv((ev) => {
       else if (ev.ok) S.proudAt = now; else S.sadAt = now;
       break;
     case "tool_pending": S.surprisedAt = now; jump(); if (!S.chatOpen) say("Can I go ahead? Check the chat.", 10, "alert"); break;
-    case "error": S.sadAt = now; if (!S.chatOpen) say(ev.message || "Something went wrong.", 8, "alert"); break;
+    case "error": S.sadAt = now; errorAt = now; if (!S.chatOpen) say(ev.message || "Something went wrong.", 8, "alert"); break;
     case "stopped": voice.stop(); break;
     case "done": voice.end(); voiceTurn = false; break;
     default: break;

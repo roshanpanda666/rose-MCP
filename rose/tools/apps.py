@@ -309,8 +309,17 @@ def move_window(window: str, monitor: int | None = None, x: int | None = None, y
         if maximize or (maximize is None and was_max):
             time.sleep(0.15)
             _set_maximized(d, X, protocol, wobj, True)
-        time.sleep(0.3)
-        now = next((wi for wi in _windows(d) if int(wi["id"], 16) == wid), None)
+        # Return once the window has settled (same geometry twice in a row, different from where it started or
+        # at the target), instead of a fixed 0.3 s; same 0.4 s ceiling for window managers that animate.
+        start = (target["x"], target["y"], target["width"], target["height"])
+        now, prev, deadline = None, None, time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            time.sleep(0.04)
+            now = next((wi for wi in _windows(d) if int(wi["id"], 16) == wid), None)
+            geo = now and (now["x"], now["y"], now["width"], now["height"])
+            if geo and geo == prev and (geo != start or (abs(geo[0] - nx) < 60 and abs(geo[1] - ny) < 60)):
+                break
+            prev = geo
     finally:
         d.close()
     where = f"monitor {monitor}" if monitor is not None else f"({nx}, {ny})"

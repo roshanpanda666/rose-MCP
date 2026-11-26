@@ -49,12 +49,16 @@ def webcam_capture(device: str = "") -> str:
     if _stream_active():
         raise ToolError("The phone's live webcam video is using the camera; close it (webcam_live_stop) first.")
     # Skip the first ~1s of frames so auto-exposure/white balance can settle.
-    base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2"]
+    base = ["ffmpeg", "-hide_banner", "-loglevel", "fatal", "-f", "v4l2"]  # MJPEG cams spam harmless APP-field errors
     tail = ["-i", device, "-vf", "select=gte(n\\,20)", "-frames:v", "1", "-q:v", "3", "-y", str(out)]
-    try:
-        run(base + ["-video_size", "1280x720"] + tail, timeout=20)
-    except ToolError:
-        run(base + tail, timeout=20)  # camera doesn't do 720p; use its default size
+    # MJPEG first: raw YUYV at 720p runs ~10 fps on most UVC cams, so the 20 settle frames took ~2.9 s (vs ~1.7 s).
+    for attempt in (["-input_format", "mjpeg", "-video_size", "1280x720"], ["-video_size", "1280x720"], []):
+        try:
+            run(base + attempt + tail, timeout=20)
+            break
+        except ToolError:
+            if not attempt:  # camera doesn't do 720p either way: its default size failed too
+                raise
     if not out.exists() or out.stat().st_size == 0:
         raise ToolError("ffmpeg ran but no image was written (is another app using the camera?).")
     notify_desktop("ROSE used the webcam", f"{cams[device]} -> {out.name}", urgency="low")

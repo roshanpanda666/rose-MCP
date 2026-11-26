@@ -786,7 +786,7 @@ def phone_frame(max_side: int = 1100, quality: int = 72) -> dict:
     from PIL import Image
     from rose.tools import phone
     with _frame_lock:  # one screencap at a time; the renderer self-paces
-        png = phone._adb("exec-out", "screencap", "-p", binary=True, timeout=20)
+        png = phone.screencap(timeout=20)
     try:
         img = Image.open(BytesIO(png)).convert("RGB")
     except Exception:
@@ -961,6 +961,7 @@ def rose_info() -> dict:
     """Everything the Rose tab shows: her look, the toggles, which face runs, the avatar art for the preview."""
     from rose import companion, face_electron, face_look
 
+    companion.pull_caveman()  # shared with the phone: show its current value
     st = companion._state()
     try:
         from rose import wake

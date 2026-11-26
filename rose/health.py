@@ -6,7 +6,6 @@ collect(probe_public=True) returns a dict; alerts are (level, title, detail) wit
 
 from __future__ import annotations
 
-import contextlib
 import json
 import shutil
 import time
@@ -17,6 +16,8 @@ import psutil
 from rose.common import http_status, systemctl_user
 from rose.common import probe_unauth as _probe
 from rose.config import LOG_DIR, ROSE_HOME, get_public_url, load_config
+
+psutil.cpu_percent(None)  # prime: later non-blocking reads measure since the previous call
 
 SERVICES = ["rose", "rose-tunnel", "rose-remote"]
 
@@ -37,15 +38,49 @@ def service_states() -> dict[str, str]:
     return states
 
 
+# path -> (bytes parsed, entries). Day logs are append-only, so each refresh parses only the new tail
+# (the dashboard used to re-parse ~12k lines every few seconds).
+_LOG_CACHE: dict[str, tuple[int, list[dict]]] = {}
+
+
+def _day_entries(p) -> list[dict]:
+    try:
+        size = p.stat().st_size
+    except OSError:
+        _LOG_CACHE.pop(str(p), None)
+        return []
+    done, entries = _LOG_CACHE.get(str(p), (0, []))
+    if size < done:  # rewritten or truncated: start over
+        done, entries = 0, []
+    if size > done:
+        with p.open("rb") as f:
+            f.seek(done)
+            chunk = f.read(size - done)
+        end = chunk.rfind(b"\n") + 1  # leave a half-written last line for next time
+        entries = entries + [e for line in chunk[:end].splitlines() if (e := _loads(line)) is not None]
+        done += end
+    _LOG_CACHE[str(p)] = (done, entries)
+    for k in [k for k in _LOG_CACHE if k != str(p) and not k.endswith(tuple(_recent_names()))]:
+        _LOG_CACHE.pop(k, None)  # keep the cache to the last few days
+    return entries
+
+
+def _recent_names(days: int = 3) -> list[str]:
+    return [f"{(datetime.now() - timedelta(days=i)):%Y-%m-%d}.jsonl" for i in range(days)]
+
+
+def _loads(line: bytes):
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
+
+
 def _events(days: int = 2) -> list[dict]:
     """Log entries (tool calls and auth events) from the last `days` days, oldest first."""
     entries = []
     for i in range(days - 1, -1, -1):
-        p = LOG_DIR / f"{(datetime.now() - timedelta(days=i)):%Y-%m-%d}.jsonl"
-        if p.exists():
-            for line in p.read_text().splitlines():
-                with contextlib.suppress(ValueError):
-                    entries.append(json.loads(line))
+        entries.extend(_day_entries(LOG_DIR / f"{(datetime.now() - timedelta(days=i)):%Y-%m-%d}.jsonl"))
     return entries
 
 
@@ -87,16 +122,7 @@ def collect(probe_public: bool = True) -> dict:
     snap["remote_calls_today"] = [e for e in snap["calls_today"] if e.get("caller") not in (None, "Forge", "?")]
     snap["webcam_today"] = [e for e in snap["calls_today"] if e.get("tool") == "webcam_capture" and e.get("ok")]
     # auth events have no timestamp field in older logs; count today's file for them
-    today_file = LOG_DIR / f"{today}.jsonl"
-    auth_events = []
-    if today_file.exists():
-        for line in today_file.read_text().splitlines():
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            if "event" in e:
-                auth_events.append(e)
+    auth_events = [e for e in _day_entries(LOG_DIR / f"{today}.jsonl") if isinstance(e, dict) and "event" in e]
     mail = [e for e in auth_events if e["event"].startswith("bridge_email_")]
     snap["email_last"] = mail[-1] if mail else None
     snap["injections"] = [e for e in auth_events if e["event"] == "injection_suspected"]
@@ -111,7 +137,7 @@ def collect(probe_public: bool = True) -> dict:
 
     vm, du = psutil.virtual_memory(), psutil.disk_usage("/")
     bat = psutil.sensors_battery()
-    snap["system"] = {"cpu": psutil.cpu_percent(interval=0.3), "ram": vm.percent,
+    snap["system"] = {"cpu": psutil.cpu_percent(None), "ram": vm.percent,
                       "ram_used_gb": round((vm.total - vm.available) / 1024**3, 1),
                       "ram_total_gb": round(vm.total / 1024**3, 1),
                       "disk": du.percent, "disk_free_gb": round(du.free / 1024**3),

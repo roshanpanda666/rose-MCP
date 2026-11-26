@@ -12,6 +12,7 @@
     rose install-services      Install the systemd services (server + tunnel), replacing v2's rose-remote
     rose lockdown on|off      Emergency switch: make ROSE read-only for every client
     rose grant [end]          Show or end the "approved for an hour" window
+    rose fingerprint ...      Passkey approvals: register | register-app | test | enable | disable | status | list | remove | lost on|off
     rose selftest [--full] [--phone]  Test every tool through the running server (--plan: coverage plan)
     rose profiles             Tool profiles and how many tools each client sees
     rose agenda setup|status  Calendar (iCal URL) + email (IMAP) for the Today view and today_overview
@@ -389,6 +390,11 @@ def cmd_grant(args) -> int:
     return 0
 
 
+def cmd_fingerprint(args) -> int:
+    from rose import fingerprint
+    return fingerprint.cli(args.rest)
+
+
 def cmd_net_fallback(args) -> int:
     from rose.tools.device import net_fallback
     return net_fallback(args.uuid)
@@ -514,6 +520,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("grant", help="show or end the approved-for-an-hour window: status | end")
     p.add_argument("action", choices=["status", "end"], nargs="?", default="status")
     p.set_defaults(fn=cmd_grant)
+    p = sub.add_parser("fingerprint", help="passkey (fingerprint) approvals: register | register-app | test | enable | disable | "
+                                           "status | list | remove <name> | lost on|off")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_fingerprint)
     p = sub.add_parser("net-fallback", help=argparse.SUPPRESS)
     p.add_argument("uuid")
     p.set_defaults(fn=cmd_net_fallback)

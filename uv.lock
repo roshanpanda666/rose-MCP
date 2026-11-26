@@ -962,6 +962,7 @@ name = "rose"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "customtkinter" },
     { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
@@ -979,6 +980,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.0" },
     { name = "customtkinter", specifier = ">=6.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3.0" },

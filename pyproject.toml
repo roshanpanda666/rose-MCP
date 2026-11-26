@@ -4,6 +4,7 @@ version = "0.3.0"
 description = "ROSE: a local MCP server that gives Claude tools to control this Linux machine"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=50.0.0",  # passkey (WebAuthn) signature checks for fingerprint approvals
     "customtkinter>=6.0.0",
     "httpx>=0.28.1",
     "mcp[cli]>=2.3.0",

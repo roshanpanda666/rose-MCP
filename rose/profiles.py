@@ -52,7 +52,7 @@ PHONE = [
 DESKTOP = [
     "take_screenshot", "list_monitors", "mouse_*", "scroll", "type_text", "press_keys", "click_on_screen",
     "find_on_screen", "screen_elements", "screen_frame", "screen_live_*", "screen_ocr", "ui_*", "browser_*",
-    "list_apps", "open_app", "open_url", "open_path", "list_windows", "focus_window", "close_window",
+    "agent_browser_*", "list_apps", "open_app", "open_url", "open_path", "list_windows", "focus_window", "close_window",
     "move_window", "arrange_window", "tile_windows", "workspace", "quick_settings", "set_quick_setting",
     "lock_screen", "power_control", "media_control", "audio_devices", "set_audio_device", "set_mic_muted",
     "bluetooth_*", "wifi_*", "speak", "stop_process", "list_commands", "run_command", "webcam_*", "list_cameras",

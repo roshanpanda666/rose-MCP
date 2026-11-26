@@ -122,6 +122,7 @@ def _run(*args: str) -> str:
 def _flashlight() -> str:
     from rose.tools import phone_actions as A
     phone._shell("cmd", "statusbar", "expand-settings")
+    time.sleep(0.5)  # let the panel finish opening: a dump mid-animation misses the tile and costs another ~2.5 s
     try:
         tile = A._wait_ui(lambda ns: next((n for n in ns if re.search(r"flash ?light|torch", n["text"] + " " + n["desc"], re.I)), None), 3)
         if not tile:

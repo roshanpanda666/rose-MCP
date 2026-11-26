@@ -8,9 +8,12 @@ none is an error (then: take_screenshot, or mouse_click with coordinates).
 
 from __future__ import annotations
 
+import contextlib
 import difflib
+import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import Literal
 
@@ -53,7 +56,14 @@ def _tree_candidates(target: list[str], everywhere: bool = False) -> list[dict]:
     return out
 
 
-def _ocr_candidates(target: list[str], area: str) -> tuple[list[dict], str]:
+# One thread per tesseract: two OCR passes run side by side here, and tesseract's OpenMP threads oversubscribe the
+# CPU badly (a 2 s pass took 18 s); single-threaded it is about as fast on its own.
+_OCR_ENV = {**os.environ, "OMP_THREAD_LIMIT": "1"}
+
+
+def _ocr_candidates(target: list[str], area: str, procs: list | None = None) -> tuple[list[dict], str]:
+    """OCR word boxes matching `target`. `procs` (optional) collects the tesseract process so a caller that no
+    longer needs the result can kill it."""
     img = screenshot._grab_x11()
     if img is None:
         raise ToolError("Can't capture the screen for OCR (X11 only).")
@@ -68,8 +78,16 @@ def _ocr_candidates(target: list[str], area: str) -> tuple[list[dict], str]:
         gray = gray.resize((gray.width * scale, gray.height * scale))
     buf = BytesIO()
     gray.save(buf, format="PNG", compress_level=1)
-    tsv = subprocess.run(["tesseract", "stdin", "stdout", "--psm", "11", "-l", "eng", "tsv"], input=buf.getvalue(),
-                         capture_output=True, timeout=40).stdout.decode(errors="replace")
+    proc = subprocess.Popen(["tesseract", "stdin", "stdout", "--psm", "11", "-l", "eng", "tsv"], env=_OCR_ENV,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if procs is not None:
+        procs.append(proc)
+    try:
+        out, _ = proc.communicate(buf.getvalue(), timeout=40)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out = b""
+    tsv = out.decode(errors="replace")
     words = []
     for row in tsv.splitlines()[1:]:
         f = row.split("\t")
@@ -123,17 +141,34 @@ def _find(target: str, area: str) -> tuple[list[dict], str]:
     # Named controls first (exact boxes, and icons like a player's Pause are named there): the active window's
     # tree, then every visible window's tree (e.g. the other monitor). OCR only after that: it also reads words
     # inside documents and chats, so it would find "Pause" in a sentence before the real button.
+    # The OCR pass starts right away in the background (the screen is grabbed now): most lookups miss the tree,
+    # and then the tree walk and OCR used to run one after the other. A tree hit just ignores the OCR result.
+    procs: list = []
+    pool = ThreadPoolExecutor(max_workers=2)
+    ocr_job = pool.submit(_ocr_candidates, words, area, procs)
+    wide_job = pool.submit(_ocr_candidates, words, "desktop", procs) if area == "auto" else None  # the fallback too
+    pool.shutdown(wait=False)
+
+    def tree_hit(found: list[dict], how: str) -> tuple[list[dict], str]:
+        for job in (ocr_job, wide_job):
+            if job is not None:
+                job.cancel()
+        for p in procs:  # OCR no longer needed: don't leave tesseract eating the CPU
+            with contextlib.suppress(OSError):
+                p.kill()
+        return _dedupe(found), how
+
     tree = _tree_candidates(words)
     if tree:
-        return _dedupe(tree), "accessibility tree of the active window"
+        return tree_hit(tree, "accessibility tree of the active window")
     if area == "auto":
         tree = _tree_candidates(words, everywhere=True)
         if tree:
-            return _dedupe(tree), "accessibility trees of all visible windows"
-    ocr, label = _ocr_candidates(words, area)
+            return tree_hit(tree, "accessibility trees of all visible windows")
+    ocr, label = ocr_job.result()
     if ocr or area != "auto":
         return _dedupe(ocr), f"OCR of {label}"
-    ocr, label = _ocr_candidates(words, "desktop")
+    ocr, label = wide_job.result() if wide_job is not None else _ocr_candidates(words, "desktop")
     return _dedupe(ocr), f"OCR of {label}"
 
 

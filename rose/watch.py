@@ -497,6 +497,8 @@ def run() -> int:
     print("rose watch: running", flush=True)
     import threading
     threading.Thread(target=_phone_loop, daemon=True, name="phone-link").start()
+    from rose import fingerprint  # phone lock state for fingerprint approvals (idle unless that mode is on)
+    threading.Thread(target=fingerprint.lock_loop, daemon=True, name="fp-lock").start()
     from rose.tools import clipboard
     threading.Thread(target=clipboard.history_loop, daemon=True, name="clipboard-history").start()
     while True:

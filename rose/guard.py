@@ -55,6 +55,8 @@ UNTRUSTED_TOOLS = {
     "media_control", "wifi_networks", "bluetooth_devices", "run_command", "take_screenshot", "webcam_capture",
     "list_apps", "audio_devices", "ui_list", "ui_read", "browser_read", "browser_tabs", "browser_status",
     "browser_bookmarks",
+    "agent_browser_status", "agent_browser_open", "agent_browser_snapshot", "agent_browser_click",
+    "agent_browser_read", "agent_browser_wait",
     "schedule_list", "watch_status", "freellm_ask", "freellm_web_search", "screen_frame", "phone_screenshot",
     "workspace", "webcam_live_frame", "motion_events",
     "memory_search", "memory_list", "git_status", "git_diff_summary", "git_log_today", "project_logs",
@@ -67,6 +69,8 @@ UNTRUSTED_TOOLS = {
 # without any confirm step.
 GUI_TOOLS = {"hand_to_claude", "phone_call", "phone_message", "phone_click_text", "mouse_click", "mouse_move", "click_on_screen", "run_routine", "scroll", "type_text", "press_keys", "ui_click", "ui_fill",
              "browser_click", "browser_fill", "browser_press",
+             # agent-browser drives the user's signed-in browser: opening a URL can leak data too
+             "agent_browser_open", "agent_browser_click", "agent_browser_fill", "agent_browser_press",
              # the phone (ADB): taps and typing can send messages; connecting grants control
              "phone_connect", "phone_tap", "phone_swipe", "phone_type", "phone_key", "phone_open_app",
              "phone_volume", "phone_media", "phone_setting", "phone_screen", "phone_notifications",
@@ -135,6 +139,8 @@ def set_lockdown(on: bool, reason: str = "") -> None:
     if on:
         LOCKDOWN_FLAG.write_text(json.dumps({"since": time.time(), "reason": reason}))
         end_grant("lockdown")
+        from rose import fingerprint
+        fingerprint.end_windows("lockdown")
     else:
         LOCKDOWN_FLAG.unlink(missing_ok=True)
     _log({"event": "lockdown_on" if on else "lockdown_off", "reason": reason})
@@ -270,6 +276,8 @@ def approve(aid: str, passphrase: str) -> dict:
     rec = load_approval(aid)
     if not rec or rec["status"] != "pending":
         raise LookupError(f"This approval is {rec['status'] if rec else 'unknown'}.")
+    if rec.get("mode") == "fingerprint":  # fingerprint approvals never accept the passphrase alone
+        raise PermissionError("This action needs your fingerprint (or the laptop fallback), not just the passphrase.")
     if not auth.check_passphrase(passphrase):
         _approve_failures.append(now)
         _log({"event": "approval_wrong_passphrase", "tool": rec["tool"], "caller": rec["caller"]})
@@ -282,6 +290,11 @@ def approve(aid: str, passphrase: str) -> dict:
         GRANT_FILE.write_text(json.dumps({"until": now + 60 * rec["grant_minutes"], "caller": rec["caller"],
                                           "approval_id": aid}))
         _log({"event": "approval_grant_started", "caller": rec["caller"], "minutes": rec["grant_minutes"]})
+    return _run_parked(rec)
+
+
+def _run_parked(rec: dict) -> dict:
+    """Run an approved, parked call (status already 'running') exactly once, as the client that asked."""
     if not _registry:  # approving from another process (the dashboard): load the tool registry
         from mcp.server.mcpserver import MCPServer
         from rose.server import register_tools
@@ -360,7 +373,28 @@ def guarded(name: str, fn: Callable, read_only: bool) -> Callable:
                                     "Wait a minute, and avoid polling in tight loops.")
                 q.append(now)
         cfg = load_config()
-        if (is_remote(who) and cfg.get("approval_mode", "passphrase") == "passphrase"
+        mode = cfg.get("approval_mode", "passphrase")
+        if mode not in ("passphrase", "chat", "fingerprint"):
+            mode = "passphrase"  # unknown/typo values fail closed (they used to switch approvals off)
+        if mode == "fingerprint" and name != "check_approval":
+            from rose import fingerprint
+            if fingerprint.applies_to(who, is_remote(who)):
+                bound = {k: v for k, v in inspect.signature(fn).bind_partial(*args, **kwargs).arguments.items()
+                         if k != "confirm"}
+                parked = fingerprint.gate(name, bound, who)
+                if parked is not None:
+                    return parked
+                try:
+                    result = fn(*args, **kwargs)
+                except Exception:
+                    fingerprint.after_call(name, who, ok=False)
+                    raise
+                fingerprint.after_call(name, who)
+                if name in UNTRUSTED_TOOLS:
+                    result = _mark_untrusted(name, result, who)
+                return result
+            mode = "passphrase"  # exempt clients keep today's passphrase rules
+        if (is_remote(who) and mode == "passphrase"
                 and not grant_active(who)):
             bound = {k: v for k, v in inspect.signature(fn).bind_partial(*args, **kwargs).arguments.items()
                      if k != "confirm"}

@@ -450,13 +450,29 @@ def phone_connect(address: str, pairing_code: str = "", pairing_address: str = "
     return f"Phone connected at {address}." + (f" Remote access (off Wi-Fi) not on: {why}" if why else "")
 
 
+_jpeg_cap: bool | None = None  # does this phone's screencap support -j (JPEG)? learned on first use
+
+
+def screencap(timeout: float = 30) -> bytes:
+    """One phone screen capture as image bytes. `screencap -j` (JPEG, newer Android) is ~0.25 s over Wi-Fi vs
+    ~1.6 s for `-p` (PNG encoding on the phone is the slow part); falls back to PNG where -j isn't supported."""
+    global _jpeg_cap
+    if _jpeg_cap is not False:
+        data = _adb("exec-out", "screencap", "-j", binary=True, timeout=timeout)
+        if data[:2] == b"\xff\xd8":
+            _jpeg_cap = True
+            return data
+        _jpeg_cap = False
+    return _adb("exec-out", "screencap", "-p", binary=True, timeout=timeout)
+
+
 def phone_screenshot() -> list:
     """Phone screenshot (preview image + size). phone_tap/phone_swipe take coordinates in this preview."""
     global _last
     from mcp.server.mcpserver import Image
     from PIL import Image as PILImage
 
-    png = _adb("exec-out", "screencap", "-p", binary=True, timeout=30)
+    png = screencap()
     try:
         img = PILImage.open(BytesIO(png)).convert("RGB")
     except Exception:
@@ -546,7 +562,7 @@ def phone_open_app(app: str) -> str:
     q = app.strip().lower()
     pkg = KNOWN_APPS.get(q) or (app.strip() if PKG_RE.match(app.strip()) else None)
     if pkg is None:
-        packages = [line.removeprefix("package:") for line in _shell("pm", "list", "packages").splitlines()]
+        packages = _packages()
         hits = [p for p in packages if q.replace(" ", "") in p.lower()]
         if not hits:
             raise ToolError(f"No phone app matches '{app}'.")
@@ -556,7 +572,31 @@ def phone_open_app(app: str) -> str:
                 raise ToolError(f"'{app}' matches several apps: {', '.join(hits[:8])}")
             hits = exact
         pkg = hits[0]
-    out = _shell("monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
-    if "No activities found" in out or "Error" in out:
-        raise ToolError(f"Couldn't launch {pkg}.")
+    if not PKG_RE.match(pkg):
+        raise ToolError(f"Not a package id: {pkg}")
+    # Resolve the launcher activity and start it in ONE adb round trip (~0.15 s). `monkey` boots a Java VM
+    # (~1.2 s), so it's only the fallback when the resolver finds nothing.
+    out = _adb("shell", f"c=$(cmd package resolve-activity --brief -a android.intent.action.MAIN "
+                        f"-c android.intent.category.LAUNCHER {pkg} | tail -n 1); case \"$c\" in */*) "
+                        f"am start -n \"$c\" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER "
+                        f"-f 0x10200000;; *) echo ROSE_NO_ACTIVITY;; esac")
+    if "ROSE_NO_ACTIVITY" in out or "Error" in out:
+        out = _shell("monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
+        if "No activities found" in out or "Error" in out:
+            raise ToolError(f"Couldn't launch {pkg}.")
     return f"Opened {pkg} on the phone."
+
+
+_pkg_cache: tuple[float, list[str]] | None = None
+
+
+def _packages() -> list[str]:
+    """Installed package ids (cached 2 min: `pm list packages` is ~0.4 s and rarely changes)."""
+    global _pkg_cache
+    if _pkg_cache and time.monotonic() - _pkg_cache[0] < 120:
+        return _pkg_cache[1]
+    pkgs = [line.removeprefix("package:").strip() for line in _shell("pm", "list", "packages").splitlines()
+            if line.startswith("package:")]
+    if pkgs:
+        _pkg_cache = (time.monotonic(), pkgs)
+    return pkgs

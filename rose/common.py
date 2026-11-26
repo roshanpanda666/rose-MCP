@@ -16,7 +16,34 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from mcp.server.mcpserver.exceptions import ToolError as _SDKToolError
+
+def _sdk_exceptions():
+    """The MCP SDK's exceptions module WITHOUT importing the SDK package (its __init__ costs ~0.55 s, paid by every
+    `rose` CLI call, e.g. the Super+R talk hotkey). The module is registered under its real name, so when the server
+    later imports the SDK it reuses this very module: ToolError stays the SDK's class (its message reaches the
+    client). Falls back to a normal import if the layout ever changes."""
+    import importlib
+    import importlib.util
+    import sys
+
+    name = "mcp.server.mcpserver.exceptions"
+    if name in sys.modules or "mcp.server.mcpserver" in sys.modules:
+        return importlib.import_module(name)
+    try:
+        root = importlib.util.find_spec("mcp")
+        path = os.path.join(root.submodule_search_locations[0], "server", "mcpserver", "exceptions.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        mod.ToolError  # noqa: B018  (layout check)
+        return mod
+    except Exception:  # noqa: BLE001
+        sys.modules.pop(name, None)
+        return importlib.import_module(name)
+
+
+_SDKToolError = _sdk_exceptions().ToolError
 
 from rose.config import LOG_DIR
 

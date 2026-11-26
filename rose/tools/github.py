@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -12,8 +15,29 @@ from rose.common import ToolError, require, run
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
+# Read-only results are reused for a short while: each GitHub request is a ~0.8 s round trip from here, and the
+# phone mood / proactive checks / the model often ask the same thing again within seconds.
+CACHE_SECONDS = 30.0
+_cache: dict[tuple, tuple[float, Any]] = {}
+_cache_lock = threading.Lock()
+
+
 def _gh(args: list[str]) -> Any:
-    """Run gh with JSON output and parse it (None for empty output)."""
+    """Run gh with JSON output and parse it (None for empty output). Cached for CACHE_SECONDS."""
+    key, now = tuple(args), time.monotonic()
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and now - hit[0] < CACHE_SECONDS:
+            return copy.deepcopy(hit[1])
+    value = _gh_uncached(args)
+    with _cache_lock:
+        if len(_cache) > 64:
+            _cache.clear()
+        _cache[key] = (time.monotonic(), value)
+    return copy.deepcopy(value)
+
+
+def _gh_uncached(args: list[str]) -> Any:
     require("gh", "sudo apt install gh && gh auth login")
     try:
         out = run(["gh", *args], timeout=30)

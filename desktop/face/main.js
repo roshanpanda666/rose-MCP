@@ -24,11 +24,11 @@ const DESKTOP_APP = path.join(__dirname, "..", "rose-desktop");
 const ICON = path.join(__dirname, "..", "renderer", "icon.png");
 const MARK = "\x1eROSE ";
 const STATE_FILE = (process.env.ROSE_FACE_STATE || "~/rose/companion.json").replace(/^~/, os.homedir());
-let FW = 260, FH = 330;                   // face window (Rose + room for her speech bubble above); grows with her size
+let FW = 352, FH = 96;                    // face window = the widget card (340x84) + 6 px margin round it                   // face window (Rose + room for her speech bubble above); grows with her size
 const CHAT_SIZES = { normal: [400, 600], tall: [460, 800] };
 
 let face = null, chat = null;
-let settings = { speak: false, caveman: true, wake: false, wake_available: false, wheel: true, wheel_button: true, barge: true, hotkey: "" };
+let settings = { speak: false, mute: false, caveman: true, wake: false, wake_available: false, wheel: true, wheel_button: true, barge: true, hotkey: "" };
 let saved = {};                           // companion.json values the host gave us (positions, chat size)
 let convId = null, fresh = false;         // the conversation this chat continues (null = the shared thread)
 let turn = null;                          // { ctrl } while Rose answers
@@ -51,12 +51,13 @@ function fromHost(msg) {
   if (ev === "show") { comeBack(); return; }             // "Hey Rose", the hotkey or `rose face` again
   if (ev === "init") {
     saved = msg.state || {};
-    Object.assign(settings, { speak: !!msg.speak, caveman: !!msg.caveman, wake: !!msg.wake, wake_available: !!msg.wake_available,
+    Object.assign(settings, { speak: !!msg.speak, mute: !!msg.mute, caveman: !!msg.caveman, wake: !!msg.wake, wake_available: !!msg.wake_available,
       wheel: !!msg.wheel, wheel_button: !!msg.wheel_button, barge: msg.barge !== false, hotkey: msg.hotkey || "" });
     fresh = !!saved.fresh;
     if (saved.chat_size && CHAT_SIZES[saved.chat_size]) chatSize = saved.chat_size;
     if (face && Array.isArray(saved.face_pos)) placeFace(saved.face_pos[0], saved.face_pos[1]);
     broadcast("settings", settings);
+    pullCaveman();   // the phone may have changed it while the face was off
     return;
   }
   if (["ctx", "sys", "hue"].includes(ev)) lastHost[ev] = msg;   // replayed to a page that loads later
@@ -152,6 +153,37 @@ async function readSSE(res, emit) {
   }
 }
 
+// ---------------- caveman mode: ONE switch with the phone (rose-phone keeps it: /api/caveman) ----------------
+// Desktop changes (this chat's button, the tray menu, the dashboard's Rose tab, the classic face) go through
+// companion.json, and the host posts them. Phone changes arrive here as "caveman" events and are saved to
+// companion.json with synced=true, so they are not posted back.
+function applyCaveman(on) {
+  if (settings.caveman === on) return;
+  settings.caveman = on;
+  toHost("save", { values: { caveman: on }, synced: true });
+  broadcast("settings", settings);
+}
+async function pullCaveman() {
+  const r = await api("/api/caveman", { timeoutMs: 5000 });
+  if (!r.ok || !r.data) return;
+  if (typeof r.data.on === "boolean") applyCaveman(r.data.on);
+  else api("/api/caveman", { method: "POST", body: { on: settings.caveman, client: "desktop" } });  // first to sync
+}
+async function followEvents() {
+  for (;;) {
+    try {
+      const res = await fetch(BASE + "/api/events", { headers: { Authorization: "Bearer " + token() } });
+      if (res.ok) {
+        await readSSE(res, (ev) => {
+          if (ev.type === "caveman" && ev.client !== "desktop" && typeof ev.on === "boolean") applyCaveman(ev.on);
+        });
+      }
+    } catch { /* rose-phone down: retry */ }
+    await new Promise((r) => setTimeout(r, 5000));
+    pullCaveman();   // catch up on what the dropped stream missed
+  }
+}
+
 function turnBusy(b) {
   broadcast("turn", { busy: b });
   toHost("state", { busy: b, talking: faceTalking });
@@ -203,7 +235,8 @@ const stripWake = (t) => t.trim().replace(/^\W*(hey|hi|okay|ok)\W+(a\s*)?(rose|r
 let voice = null;   // the recording coming in: { id, source, pcm: Buffer[], ctrl, push, close, res }
 
 function voicePath(source) {
-  const q = new URLSearchParams({ rate: String(RATE), client: "desktop", caveman: settings.caveman ? "true" : "false" });
+  // caveman: left out, so rose-phone's shared switch decides (the phone's chip and widget use the same one)
+  const q = new URLSearchParams({ rate: String(RATE), client: "desktop" });
   if (convId) q.set("conversation_id", convId);
   else if (fresh) q.set("new", "true");
   if (source === "wake") q.set("wake", "true");
@@ -276,7 +309,7 @@ async function voiceFinish(v, wav) {
   heard(v.source, text);
   broadcast("user-msg", { text, voice: true });
   streamTurn("/api/chat", { message: text, conversation_id: convId, continue_current: !convId && !fresh,
-    client: "desktop", caveman: settings.caveman });
+    client: "desktop" });
 }
 
 /** Rose's reply to a voice turn (SSE from /api/voice). False = this server has no /api/voice (use the old way). */
@@ -350,8 +383,8 @@ function workAreaAt(x, y) { return screen.getDisplayNearestPoint({ x: Math.round
 function placeFace(x, y) {
   if (!face) return;
   const wa = workAreaAt(x + FW / 2, y + FH / 2);
-  x = Math.min(Math.max(wa.x - 60, Math.round(x)), wa.x + wa.width - FW + 60);
-  y = Math.min(Math.max(wa.y - 120, Math.round(y)), wa.y + wa.height - FH + 10);
+  x = Math.min(Math.max(wa.x - 6, Math.round(x)), wa.x + wa.width - FW + 6);
+  y = Math.min(Math.max(wa.y - 6, Math.round(y)), wa.y + wa.height - FH + 6);
   face.setPosition(x, y);
   if (chat && chat.isVisible()) dockChat();
 }
@@ -423,11 +456,11 @@ function dockChat() {
   if (!chat || !face) return;
   const f = face.getBounds(), c = chat.getBounds();
   const wa = workAreaAt(f.x + f.width / 2, f.y + f.height / 2);
-  const inset = Math.max(0, (f.width - dims()[0] * (look.size || 1)) / 2 - 6);   // where her figure starts in the face window
-  const left = f.x + inset - c.width - 4;
-  let x = left >= wa.x ? left : f.x + f.width - inset + 4;
+  // the chat sits above the card, right edges lined up; below it when there's no room above
+  let x = f.x + f.width - 6 - c.width;
   x = Math.min(Math.max(wa.x + 4, x), wa.x + wa.width - c.width - 4);
-  let y = f.y + f.height - c.height - 6;
+  let y = f.y - c.height + 2;
+  if (y < wa.y + 4) y = f.y + f.height - 2;
   y = Math.min(Math.max(wa.y + 4, y), wa.y + wa.height - c.height - 4);
   chat.setPosition(Math.round(x), Math.round(y));
 }
@@ -472,7 +505,7 @@ function closedByUser() {
 // ---------------- live settings: companion.json (the dashboard's Rose tab writes it) ----------------
 const VIEW_DIMS = { face: [96, 138], bust: [108, 156], full: [110, 256] };
 const dims = () => VIEW_DIMS[look.view] || VIEW_DIMS.bust;
-function faceSize(size) { const [w, h] = dims(); return { w: Math.max(260, Math.round(w * size) + 80), h: Math.round(h * size) + 174 }; }
+function faceSize() { return { w: 352, h: 96 }; }   // the card has one size (her look only colours the avatar)
 
 function readState() {
   let st;
@@ -553,6 +586,8 @@ function popupMenu(win) {
     { label: "Send clipboard file to phone", click: () => toHost("send_files", { source: "clipboard" }) },
     { label: "Send latest download to phone", click: () => toHost("send_files", { source: "download" }) },
     { type: "separator" },
+    { label: "Mute Rose (no voice at all)", type: "checkbox", checked: settings.mute, click: () => toggleMute() },
+    { label: "Mic on (hands-free listening)", type: "checkbox", checked: settings.wake || settings.barge, click: () => toggleMic() },
     { label: "Speak replies", type: "checkbox", checked: settings.speak, click: (i) => set("speak", i.checked) },
     { label: "Caveman mode (short replies)", type: "checkbox", checked: settings.caveman, click: (i) => set("caveman", i.checked) },
     { label: 'Listen for "Hey Rose" (offline)', type: "checkbox", checked: settings.wake, enabled: settings.wake_available,
@@ -563,9 +598,6 @@ function popupMenu(win) {
       click: (i) => set("wheel_button", i.checked, "wheel_button") },
     { label: "New conversation", click: () => newChat() },
     { type: "separator" },
-    ...[["face", "Face only"], ["bust", "Head & shoulders"], ["full", "Full body"]].map(([v, label]) => ({
-      label, type: "radio", checked: (look.view || "bust") === v, click: () => toHost("look", { changes: { view: v } }) })),
-    { type: "separator" },
     { label: "Open ROSE Desktop", enabled: fs.existsSync(DESKTOP_APP), click: () => spawn(DESKTOP_APP, [], { detached: true, stdio: "ignore" }).unref() },
     { label: "Use classic face", click: () => toHost("classic") },
     { label: "Restart Rose", click: () => toHost("restart") },
@@ -575,6 +607,26 @@ function popupMenu(win) {
   menu.popup({ window: win });
 }
 ipcMain.on("face:menu", () => popupMenu(face));
+
+// The buttons beside her (close: see face:toggle). Mute: no voice at all (voice turns too). Mic: her hands-free ears, i.e. "Hey Rose"
+// (when the offline model is there) and talking over her; off = she only listens when you press talk.
+function toggleMute() {
+  settings.mute = !settings.mute;
+  toHost("save", { values: { mute: settings.mute } });
+  broadcast("settings", settings);
+}
+function toggleMic() {
+  const on = !(settings.wake || settings.barge);
+  settings.barge = on;
+  toHost("barge", { on });
+  if (settings.wake_available || !on) { settings.wake = on && settings.wake_available; toHost("wake", { on: settings.wake }); }
+  broadcast("settings", settings);
+}
+ipcMain.on("face:toggle", (_e, what) => {
+  if (what === "mute") toggleMute();
+  else if (what === "mic") toggleMic();
+  else if (what === "close") closedByUser();   // same as "Hide Rose": windows away, still listening
+});
 
 ipcMain.handle("face:tts", async (_e, text) => {
   if (typeof text !== "string" || !text.trim()) return { ok: false };
@@ -596,8 +648,7 @@ ipcMain.handle("chat:send", (_e, text, voice) => {
   if (!text) return { ok: false };
   if (turn) return { ok: false, error: "Rose is still answering. Stop her first, or wait a moment." };
   broadcast("user-msg", { text, voice: !!voice });
-  const body = { message: text, conversation_id: convId, continue_current: !convId && !fresh, client: "desktop",
-    caveman: settings.caveman };
+  const body = { message: text, conversation_id: convId, continue_current: !convId && !fresh, client: "desktop" };
   return streamTurn("/api/chat", body);
 });
 
@@ -659,6 +710,7 @@ if (!app.requestSingleInstanceLock()) {
     if (fs.existsSync(ICON)) app.dock?.setIcon?.(nativeImage.createFromPath(ICON));
     createFace();
     createChat();
+    followEvents();
     for (const ev of ["display-added", "display-removed", "display-metrics-changed"]) {
       screen.on(ev, () => { const b = face.getBounds(); placeFace(b.x, b.y); });
     }

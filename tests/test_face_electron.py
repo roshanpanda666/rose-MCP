@@ -65,7 +65,30 @@ def test_save_only_known_keys(monkeypatch):
     monkeypatch.setattr(companion, "_save_state", lambda **kw: saved.update(kw))
     h = _host()
     h.handle({"cmd": "save", "values": {"speak": True, "face_pos": [10, 20], "evil": 1, "face_ui": "x"}})
-    assert saved == {"speak": True, "face_pos": [10, 20]}
+    assert saved == {"_push": True, "speak": True, "face_pos": [10, 20]}
+    saved.clear()  # a value that came from the phone (synced) is saved without posting it back
+    h.handle({"cmd": "save", "values": {"caveman": False}, "synced": True})
+    assert saved == {"_push": False, "caveman": False}
+
+
+def test_caveman_change_is_posted_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(companion, "STATE_FILE", tmp_path / "companion.json")
+    posts = []
+    monkeypatch.setattr(companion, "push_caveman", lambda: posts.append(companion._state()["caveman"]))
+
+    class T:  # run the post inline
+        def __init__(self, target, daemon=None):
+            self.t = target
+
+        def start(self):
+            self.t()
+
+    monkeypatch.setattr(companion.threading, "Thread", T)
+    companion._save_state(caveman=False)
+    companion._save_state(caveman=False)               # unchanged: no post
+    companion._save_state(_push=False, caveman=True)   # from the phone: no echo
+    companion._save_state(speak=True)                  # other keys: no post
+    assert posts == [False]
 
 
 def test_state_and_send(monkeypatch):

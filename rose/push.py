@@ -21,7 +21,7 @@ def settings() -> tuple[str, str]:
 
 
 def push(title: str, message: str = "", url: str | None = None, priority: str = "default",
-         tags: str = "", desktop: bool = True) -> bool:
+         tags: str = "", desktop: bool = True, actions: list[dict] | None = None) -> bool:
     """Send a phone push (if set up) and a desktop notification. Never raises; returns True if pushed."""
     if desktop:
         notify_desktop(title, message)
@@ -39,6 +39,8 @@ def push(title: str, message: str = "", url: str | None = None, priority: str = 
         if url:
             body["click"] = url
             body["actions"] = [{"action": "view", "label": "Open", "url": url, "clear": True}]
+        if actions:  # ntfy allows 3 buttons
+            body["actions"] = (actions + body.get("actions", []))[:3]
         try:
             r = httpx.post(server, json=body, timeout=10)
             _log({"event": "push_sent" if r.status_code < 300 else "push_failed", "title": title[:80],

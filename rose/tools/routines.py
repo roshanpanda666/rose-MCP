@@ -126,8 +126,11 @@ def run_routine(name: str) -> str:
     except Exception:
         snap = None  # never block the routine over the undo snapshot
     done, failed = [], []
+    last_open = None  # when the last window-opening step ran (the undo snapshot waits SETTLE after it)
     for s in r["steps"]:
         try:
+            if s["tool"] in OPENS:
+                last_open = time.monotonic()
             tools[s["tool"]](**(s.get("args") or {}))
             if s["tool"] != "wait":
                 done.append(s["tool"].replace("_", " ") + (f" {s['args'].get('setting', '')}".rstrip()
@@ -136,8 +139,8 @@ def run_routine(name: str) -> str:
             failed.append(f"{s['tool']}: {str(e)[:120]}")
     if snap is not None:
         try:
-            if any(st["tool"] in OPENS for st in r["steps"]) and r["steps"][-1]["tool"] != "wait":
-                time.sleep(SETTLE)  # let freshly launched windows map, so undo can close them
+            if last_open is not None:  # let freshly launched windows map, so undo can close them; time already
+                time.sleep(max(0.0, SETTLE - (time.monotonic() - last_open)))  # spent on later steps counts
             undo.routine_after(key, snap)
         except Exception:
             pass

@@ -199,8 +199,10 @@ def speak(text: str) -> str:
     text = text.strip()
     if not text or len(text) > 500:
         raise ToolError("Text must be 1-500 characters.")
-    run(["spd-say", "--wait", "--", text], timeout=60)
-    return "Spoken."
+    # No --wait: speech-dispatcher queues it and speaks in the background, so the tool returns at once instead of
+    # blocking for the whole utterance (a long sentence held the caller for seconds).
+    run(["spd-say", "--", text], timeout=15)
+    return "Speaking."
 
 
 def open_path(path: str) -> str:

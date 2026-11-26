@@ -143,7 +143,22 @@ def _norm_number(raw: str) -> str:
     return "+" + digits if len(digits) > 10 else digits
 
 
+_contacts_cache: tuple[float, dict[str, dict]] | None = None
+CONTACTS_TTL = 300.0  # `content query` boots a Java VM on the phone (~2 s); contacts rarely change mid-task
+
+
 def _contacts() -> dict[str, dict]:
+    """Phone contacts by name (kept in memory for CONTACTS_TTL; never written to disk)."""
+    global _contacts_cache
+    if _contacts_cache and time.monotonic() - _contacts_cache[0] < CONTACTS_TTL:
+        return _contacts_cache[1]
+    people = _contacts_uncached()
+    if people:
+        _contacts_cache = (time.monotonic(), people)
+    return people
+
+
+def _contacts_uncached() -> dict[str, dict]:
     out = phone._adb("shell", "content query --uri content://com.android.contacts/data/phones "
                               "--projection display_name:data1:is_primary:is_super_primary", timeout=20)
     people: dict[str, dict] = {}

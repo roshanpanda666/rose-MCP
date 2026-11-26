@@ -70,7 +70,7 @@ def _safe(fn: Callable[[], Any], default: Any = None) -> Any:
 
 
 def _ssid() -> str | None:
-    rows = _out(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"]).splitlines()
+    rows = _out(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi", "list", "--rescan", "no"]).splitlines()
     return next((r.split(":", 1)[1] for r in rows if r.startswith("yes:")), None)
 
 

@@ -3,6 +3,7 @@
 Uses a temporary token labelled "Forge" (local, so actions run without approval links), revoked at the
 end. Default mode avoids anything you'd notice; --full also opens windows, types into a test file,
 takes a webcam photo (deleted), speaks, opens a browser tab and runs one Forge job (uses work quota).
+With agent_browser_enabled, --full also opens (then closes) one tab in the configured agent-browser target.
 """
 
 from __future__ import annotations
@@ -166,6 +167,47 @@ def run(full: bool = False, port: int | None = None, phone: bool = False) -> int
             rec(tool, good, txt(r)[:120], soft=soft and not good)
             return r
 
+        async def agent_browser_suite(url):
+            """agent-browser (flag on): opens one tab on the local test page in the configured browser."""
+            import re as _re
+            st = J(await c("agent_browser_status", {}))
+            if not (isinstance(st, dict) and st.get("reachable")):
+                why = (st or {}).get("endpoint_error", "not reachable") if isinstance(st, dict) else st
+                for t in ("agent_browser_open", "agent_browser_snapshot", "agent_browser_click", "agent_browser_fill",
+                          "agent_browser_press", "agent_browser_read", "agent_browser_wait", "agent_browser_close"):
+                    rec(t, False, why, soft=True)
+                return
+            if st.get("target") == "rose":
+                await c("browser_start", {})
+                await anyio.sleep(3)
+            rec("agent_browser_open", not (await c("agent_browser_open", {"url": url})).is_error)
+            await c("agent_browser_wait", {"load": "load"})
+
+            def ref(snap, role, name):
+                m = _re.search(role + r' "' + _re.escape(name) + r'"[^\n\[]*\[ref=(e\d+)\]', snap)
+                return "@" + m.group(1) if m else ""
+            snap = txt(await c("agent_browser_snapshot", {}))
+            rec("agent_browser_snapshot", 'button \\"Send\\"' in snap or 'button "Send"' in snap, snap[:120])
+            snap = snap.replace('\\"', '"').replace("\\n", "\n")
+            r = await c("agent_browser_fill", {"ref": ref(snap, "textbox", "Search here"), "text": "hi"})
+            rec("agent_browser_fill", "Read-back OK" in txt(r), txt(r))
+            send = ref(snap, "button", "Send")
+            refused = (await c("agent_browser_click", {"ref": send})).is_error
+            await c("agent_browser_click", {"ref": send, "confirm": True})
+            stale = await c("agent_browser_click", {"ref": send})  # refs cleared after a click
+            rec("agent_browser_read", "SENT:" in txt(await c("agent_browser_read", {})))
+            rec("agent_browser_click", refused and stale.is_error and "snapshot" in txt(stale).lower()
+                and results.get("agent_browser_read", ("",))[0] == "PASS", "confirm gate + stale ref")
+            snap = txt(await c("agent_browser_snapshot", {})).replace('\\"', '"').replace("\\n", "\n")
+            await c("agent_browser_fill", {"ref": ref(snap, "textbox", "Form field"), "text": "x"})
+            refused = (await c("agent_browser_press", {"key": "Enter"})).is_error
+            await c("agent_browser_press", {"key": "Enter", "confirm": True})
+            r = await c("agent_browser_wait", {"text": "SUBMITTED", "timeout_s": 5})
+            rec("agent_browser_wait", not r.is_error, txt(r))
+            rec("agent_browser_press", refused and not r.is_error)
+            r = await c("agent_browser_close", {})
+            rec("agent_browser_close", not r.is_error and "Closed 1" in txt(r), txt(r))
+
         for tool, args in [("undo_history", {}), ("list_routines", {}), ("list_triggers", {}),
                            ("observation_stats", {}), ("browser_bookmarks", {}), ("workspace", {}),
                            ("recording_status", {}), ("recording_list", {}), ("mic_sources", {}),
@@ -176,7 +218,8 @@ def run(full: bool = False, port: int | None = None, phone: bool = False) -> int
             await ok(tool, args)
         for tool, args in [("freellm_info", {}), ("docker", {}), ("package_updates", {}), ("phone_devices", {}),
                            ("screen_ocr", {"copy": False}), ("find_on_screen", {"target": "ROSE"}),
-                           ("explain_error", {"project": "rose-MCP"})]:
+                           ("explain_error", {"project": "rose-MCP"}),
+                           ("agent_browser_status", {})]:
             await ok(tool, args, soft=True)  # depends on services/hardware: SKIP, not FAIL, when unavailable
         for tool in ("git_status", "git_diff_summary", "git_log_today", "project_tasks"):
             await ok(tool, {"project": "rose-MCP"})
@@ -331,6 +374,8 @@ def run(full: bool = False, port: int | None = None, phone: bool = False) -> int
             await anyio.sleep(1)
             try:
                 url = f"http://127.0.0.1:{wport}/"
+                if "agent_browser_open" in tools:
+                    await agent_browser_suite(url)
                 rec("browser_start", not (await c("browser_start", {"url": url})).is_error)
                 await anyio.sleep(3)
                 rec("browser_open", not (await c("browser_open", {"url": url})).is_error)
@@ -407,11 +452,12 @@ browser_bookmarks workspace recording_status recording_list mic_sources list_pro
 clipboard_history today_overview failure_report claude_job_status memory_list memory_save memory_search
 memory_forget sort_downloads screen_frame freellm_info docker package_updates phone_devices screen_ocr
 find_on_screen explain_error git_status git_diff_summary git_log_today project_tasks git_branch project_logs
-create_folder edit_file copy_file zip_files unzip_file trash_file"""
+create_folder edit_file copy_file zip_files unzip_file trash_file agent_browser_status"""
 _FULL = """open_app focus_window close_window open_url open_path mouse_click scroll type_text press_keys webcam_capture
 speak forge_run forge_status bridge_post schedule_add schedule_remove ui_click ui_read ui_fill
 ui_enable_app_accessibility browser_start browser_open browser_tabs browser_fill browser_click browser_read
-browser_press browser_close_tab screen_elements mouse_move"""
+browser_press browser_close_tab screen_elements mouse_move agent_browser_open agent_browser_snapshot
+agent_browser_click agent_browser_fill agent_browser_press agent_browser_read agent_browser_wait agent_browser_close"""
 _PHONE = """phone_status phone_contacts phone_ui_list phone_screenshot phone_notifications phone_volume
 phone_call_control phone_location"""
 _PHONE_CHECK = {"phone_call": "call", "phone_message": "message", "phone_lost_mode": "lost_mode",
@@ -450,7 +496,7 @@ def print_plan() -> int:
     from collections import Counter
 
     from rose.server import _tool_table
-    names = [fn.__name__ for fn, _ in _tool_table()]
+    names = [fn.__name__ for fn, _ in _tool_table(include_optional=True)]
     for n in names:
         print(f"{n:28} {PLAN.get(n, 'MISSING FROM PLAN')}")
     kinds = Counter(PLAN.get(n, "missing").split(" ")[0].split(":")[0] for n in names)
