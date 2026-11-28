@@ -138,18 +138,103 @@ class MicStream:
         return b""
 
 
+class ClapDetector:
+    """A double clap: two sharp claps 0.12-0.8 s apart. Fed 0.1 s chunks (16 kHz s16le mono), judged per
+    10 ms frame. feed() is True on the frame that completes a double clap.
+
+    A clap is a frame far louder than the room and than the frame just before it (it starts at once) that
+    dies away within 0.12 s. Speech, music and slammed doors swell or ring on, so they don't count. After a
+    double clap, claps are ignored for COOLDOWN frames (applause or a third clap doesn't fire again).
+    """
+
+    FRAME = 160  # 10 ms
+    MIN_LEVEL = 0.03  # frame RMS (full scale = 1) a clap must reach
+    OVER_FLOOR = 8.0  # ... and this many times the room's noise floor
+    JUMP = 4.0  # ... and this many times the frame before
+    MAX_FRAMES = 12  # loud for at most 0.12 s
+    DECAY = 0.25  # a clap is over when the level falls to this share of its peak
+    GAP = (12, 80)  # frames between the starts of the two claps (0.12-0.8 s)
+    COOLDOWN = 150  # frames (1.5 s) after a double clap
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget everything (a fresh mic, or Rose was talking)."""
+        self.t = 0
+        self.floor: float | None = None
+        self.prev = 0.0
+        self.hit: list | None = None  # [start frame, peak level] of a possible clap
+        self.wait_quiet = False  # a long loud sound: wait for quiet before looking for a new clap
+        self.last_clap = -10 ** 9
+        self.quiet_until = 0
+
+    def feed(self, chunk: bytes) -> bool:
+        import array
+
+        a = array.array("h", chunk[: len(chunk) // 2 * 2])
+        fired = False
+        for i in range(0, len(a) - self.FRAME + 1, self.FRAME):
+            level = math.sqrt(sum(v * v for v in a[i:i + self.FRAME]) / self.FRAME) / 32768
+            fired = self._frame(level) or fired
+        return fired
+
+    def _frame(self, level: float) -> bool:
+        t, self.t = self.t, self.t + 1
+        if self.floor is None:
+            self.floor = max(level, 0.002)
+        fired = False
+        if self.hit is not None:
+            start, peak = self.hit
+            if level > peak:
+                self.hit[1] = peak = level
+            if level <= peak * self.DECAY:
+                self.hit = None
+                fired = self._clap(start)
+            elif t - start >= self.MAX_FRAMES:  # still loud: not a clap
+                self.hit = None
+                self.wait_quiet = True
+        elif self.wait_quiet:
+            if level < self.floor * 3:
+                self.wait_quiet = False
+        elif level >= max(self.MIN_LEVEL, self.floor * self.OVER_FLOOR) and level >= self.prev * self.JUMP:
+            self.hit = [t, level]
+        if self.hit is None and not self.wait_quiet:
+            # the room's noise floor: follows quieter frames quickly, louder ones slowly
+            rate = 0.05 if level < self.floor else 0.002
+            self.floor = max(0.002, self.floor + (level - self.floor) * rate)
+        self.prev = level
+        return fired
+
+    def _clap(self, start: int) -> bool:
+        if start < self.quiet_until:
+            return False
+        if self.GAP[0] <= start - self.last_clap <= self.GAP[1]:
+            self.last_clap = -10 ** 9
+            self.quiet_until = start + self.COOLDOWN
+            return True
+        self.last_clap = start
+        return False
+
+
 class WakeListener(threading.Thread):
     """on_wake(): the wake word was heard. on_command(wav_bytes): what was said after it (may be empty).
     paused(): True while Rose is talking/busy (so she doesn't wake herself). on_mic(count, error): the mic
-    went away and we are waiting for it back.
+    went away and we are waiting for it back. on_clap(): a double clap was heard (clap_on() says whether
+    to look for one); wake_on() says whether to look for the wake word. Either can be off while the other runs.
 
     The mic stays open the whole time the thread runs, even while paused and while Rose is closed away to
     the background: pausing only stops the audio reaching the recognizer.
     """
 
-    def __init__(self, on_wake, on_command, paused, on_mic=None, on_chunk=None):
+    def __init__(self, on_wake, on_command, paused, on_mic=None, on_chunk=None, on_clap=None, clap_on=None,
+                 wake_on=None):
         super().__init__(daemon=True)
         self.on_wake, self.on_command, self.paused = on_wake, on_command, paused
+        self.on_clap = on_clap
+        self.clap_on = clap_on or (lambda: False)
+        self.wake_on = wake_on or (lambda: True)
+        self.clap = ClapDetector()
         self.on_mic = on_mic
         self.on_chunk = on_chunk  # each 0.1 s of the command as it is recorded (streamed on to Whisper)
         self.enabled = True
@@ -162,11 +247,7 @@ class WakeListener(threading.Thread):
             self.mic.shutdown()
 
     def run(self):
-        from vosk import KaldiRecognizer, Model, SetLogLevel
-
-        SetLogLevel(-1)
-        model = Model(str(MODEL))
-        grammar = KaldiRecognizer(model, RATE, json.dumps(PHRASES))
+        model = grammar = None  # Vosk loads the first time the wake word is on
         recent = collections.deque(maxlen=40)  # last 4 s, to confirm the wake word
         self.mic = MicStream(self._stop, on_reopen=self.on_mic)
         opens = 0
@@ -178,11 +259,33 @@ class WakeListener(threading.Thread):
                 if self.mic.opens != opens:  # a fresh mic: the old audio doesn't join onto the new
                     opens = self.mic.opens
                     recent.clear()
-                    grammar.Reset()
+                    self.clap.reset()
+                    if grammar:
+                        grammar.Reset()
                 if not self.enabled or self.paused():
                     recent.clear()
-                    grammar.Reset()
+                    self.clap.reset()
+                    if grammar:
+                        grammar.Reset()
                     continue
+                if self.on_clap and self.clap_on() and self.clap.feed(chunk):
+                    recent.clear()
+                    if grammar:
+                        grammar.Reset()
+                    try:
+                        self.on_clap()
+                    except Exception:  # a failing handler must never stop her ears
+                        pass
+                    continue
+                if not self.wake_on() or not available():
+                    recent.clear()
+                    continue
+                if grammar is None:
+                    from vosk import KaldiRecognizer, Model, SetLogLevel
+
+                    SetLogLevel(-1)
+                    model = Model(str(MODEL))
+                    grammar = KaldiRecognizer(model, RATE, json.dumps(PHRASES))
                 recent.append(chunk)
                 final = grammar.AcceptWaveform(chunk)
                 text = json.loads(grammar.Result() if final else grammar.PartialResult()).get("text" if final else "partial", "")

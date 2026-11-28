@@ -51,7 +51,12 @@ DEFAULT_CONFIG = {
     "approval_required_tools": ["webcam_capture"],
     "approval_grant_minutes": 60,
     "fingerprint_window_minutes": 2,
+    "fingerprint_change_window_minutes": 3,
+    "fingerprint_idle_minutes": 10,
     "fingerprint_trusted_clients": ["Phone app"],
+    "fingerprint_trusted_when_locked": False,
+    "fingerprint_trusted_reads_need_window": True,
+    "fingerprint_trusted_changes_need_window": True,
     "fingerprint_fresh_tools": ["phone_call", "phone_message", "phone_call_control", "webcam_capture",
                                 "webcam_live_stream", "phone_photo", "phone_mic_record", "mic_live_start"],
     "fingerprint_gate_local": False,
@@ -108,9 +113,11 @@ DEFAULT_CONFIG = {
     "agent_browser_enabled": False,
     "agent_browser_target": "brave",
     "agent_browser_binary": "",
+    "host_os": "auto",
 }
 
 _COMMENTS = {
+    "host_os": 'Which OS ROSE runs on, so it picks the right system commands: "auto" (detect), "linux", "windows" or "macos"',
     "default_profile": 'Tool profile for clients not listed in client_profiles: "full" (every tool), "dev", "phone" or "desktop" (see rose/profiles.py; `rose profiles` shows counts)',
     "client_profiles": 'Tool profile per client label (labels from `rose auth list`), e.g. "Phone app" = "phone"',
     "browser_port": "DevTools port for ROSE's own browser (browser_*; 127.0.0.1 only). Not 9222: Brave/Chrome use that when you allow remote debugging",
@@ -152,8 +159,13 @@ _COMMENTS = {
                       '(recommended). "chat": confirm=true in chat is enough. "fingerprint": every remote call '
                       'needs your phone\'s fingerprint (passkey; turn on with `rose fingerprint enable`). '
                       'Unknown values act like "passphrase"'),
-    "fingerprint_window_minutes": "Fingerprint mode: after a fingerprint, that client may run non-sensitive tools for this many minutes (1-10) until your phone locks",
-    "fingerprint_trusted_clients": "Fingerprint mode: clients that never need a fingerprint (default the Rose apps, \"Phone app\"); a locked phone or lost-phone mode still blocks them",
+    "fingerprint_window_minutes": "Fingerprint mode: after a fingerprint, that client may run read-only tools for this many minutes (1-60) until your phone locks",
+    "fingerprint_change_window_minutes": "Fingerprint mode: after a fingerprint, that client may run tools that change something (typing, clicks, apps, files) for only this many minutes (1-60)",
+    "fingerprint_idle_minutes": "Fingerprint mode: a fingerprint window ends after this many minutes with no calls from that client (1-60)",
+    "fingerprint_trusted_clients": "Fingerprint mode: clients that skip the fingerprint for everyday tools (default the Rose apps, \"Phone app\"); fresh calls (calls, messages, camera, mic, code-running, confirm=true) still need one, and a locked phone or lost-phone mode still blocks them",
+    "fingerprint_trusted_reads_need_window": "Fingerprint mode: the trusted Rose apps (widget, phone app) need a fingerprint before read-only tools too, then the read window covers them. Off = the apps read with no fingerprint while the phone is unlocked",
+    "fingerprint_trusted_changes_need_window": "Fingerprint mode: the trusted Rose apps (widget, phone app) need a fingerprint before tools that change something, then the short change window covers them. Off = the apps change things with no fingerprint while the phone is unlocked",
+    "fingerprint_trusted_when_locked": "Fingerprint mode: the trusted Rose apps keep working while your phone is locked (camera, phone and laptop tools with the screen off). Anyone holding the app token can then act without your phone in hand; lost-phone mode still blocks them",
     "fingerprint_fresh_tools": "Fingerprint mode: tools that always need a fresh fingerprint (calls, messages, camera, mic)",
     "fingerprint_gate_local": "Fingerprint mode: also gate local Claude Code (Forge)",
     "fingerprint_exempt_clients": "Fingerprint mode: client labels that keep the passphrase rules instead (labels from `rose auth list`)",
@@ -235,6 +247,8 @@ def write_default_config(values: dict) -> None:
 def _private(path: Path, mode: int) -> None:
     """chmod if we own it; ROSE's data (typed text, screenshots, memories, job commands) is for this user only."""
     try:
+        if not hasattr(os, "getuid"):  # Windows: no POSIX modes; the profile folder is already per-user
+            return
         if path.exists() and path.stat().st_uid == os.getuid() and path.stat().st_mode & 0o777 != mode:
             os.chmod(path, mode)
     except OSError:

@@ -584,6 +584,7 @@
             <label class="check"><input type="checkbox" id="roseSpeak"> Speak her replies out loud</label>
             <label class="check"><input type="checkbox" id="roseCaveman"> Caveman mode (short replies)</label>
             <label class="check"><input type="checkbox" id="roseWake"> Listen for "Hey Rose" (offline; restarts her)</label>
+            <label class="check"><input type="checkbox" id="roseClap"> Double clap to talk (like the talk hotkey: she shows up and listens)</label>
             <label class="field">Face style <select id="roseUi"><option value="electron">New (Electron)</option><option value="tk">Classic (Tk)</option></select></label>
             <p class="muted small" id="roseHotkey"></p>
           </div>
@@ -598,6 +599,13 @@
           <label class="slider-l">Main color <span id="accentName" class="muted small"></span>
             <input type="range" id="accentHue" min="0" max="359" class="hue"></label>
           <div class="row"><button id="accentReset" class="small-btn">Theme default color</button></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2>Operating system</h2><div class="grow"></div><span id="osPill" class="pill"></span></div>
+          <p class="muted small">ROSE picks the system commands for this OS (open files, play sound, record the mic, services). Automatic detects it; pick one only if detection is wrong.</p>
+          <label class="field">This computer runs <select id="setHostOs"></select></label>
+          <p class="small" id="osWarn" hidden></p>
+          <ul class="checklist" id="osJobs"></ul>
         </div>
         <div class="grid2">
           <div class="card">

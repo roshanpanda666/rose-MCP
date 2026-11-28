@@ -126,3 +126,16 @@ def test_config_key_default_and_override(settings, monkeypatch):
     assert auth._reuse_grace() == 60.0
     monkeypatch.setattr(auth, "load_config", lambda: {**real(), "refresh_reuse_grace_seconds": -3})
     assert auth._reuse_grace() == 0.0
+
+
+def test_reuse_after_grace_revokes_the_whole_sign_in(setup, monkeypatch):
+    """RFC 9700: a thief who rotated first must lose access when the owner's stale copy comes back."""
+    p, c1, _, tok = setup
+    thief = _refresh(p, c1, tok.refresh_token)  # rotated by whoever got there first
+    thief2 = _refresh(p, c1, thief.refresh_token)
+    other = p._issue("c1", ["rose"], None)  # a separate sign-in of the same client is left alone
+    with pytest.raises(TokenError):
+        _refresh(p, c1, tok.refresh_token)  # the original, long since spent, comes back
+    assert run(p.load_access_token(thief2.access_token)) is None
+    assert run(p.load_refresh_token(c1, thief2.refresh_token)) is None
+    assert run(p.load_access_token(other.access_token)).client_id == "c1"

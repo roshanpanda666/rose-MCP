@@ -184,8 +184,29 @@ ipcMain.handle("wheel:confirm", async (_e, message, ok = "Continue") => {
   return r.response === 0;
 });
 
+// Approval links only ever point at ROSE itself: its public URL (~/rose/public_url.txt), the phone backend, or
+// loopback. Anything else from a backend reply is refused, so a forged approval_url can't open a look-alike page.
+function approvalHostOk(url) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  if (!["https:", "http:"].includes(u.protocol)) return false;
+  if (["127.0.0.1", "localhost", "[::1]"].includes(u.hostname)) return true;
+  if (u.protocol !== "https:") return false;
+  const hosts = new Set();
+  try { hosts.add(new URL(BASE).host); } catch {}
+  try {
+    const home = (process.env.ROSE_HOME || path.join(os.homedir(), "rose")).replace(/^~/, os.homedir());
+    hosts.add(new URL(fs.readFileSync(path.join(home, "public_url.txt"), "utf8").trim()).host);
+  } catch {}
+  return hosts.has(u.host);
+}
+
 ipcMain.handle("wheel:open", (_e, url) => {
-  if (typeof url === "string" && /^https?:\/\//.test(url)) shell.openExternal(url);
+  if (typeof url !== "string" || !approvalHostOk(url)) {
+    console.error(`wheel: refusing to open ${String(url).slice(0, 120)} (not a ROSE address)`);
+    return false;
+  }
+  shell.openExternal(url);
   return true;
 });
 

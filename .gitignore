@@ -4,3 +4,7 @@ __pycache__/
 .env*
 *.log
 .claude/worktrees/
+
+# deepsec scan output
+security/findings/
+security/deepsec/node_modules/

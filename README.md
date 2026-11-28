@@ -5,6 +5,20 @@ ROSE has no LLM inside it: Claude does the reasoning and ROSE does the actions.
 
 Built with the official MCP Python SDK (`mcp` 2.x, where `FastMCP` is now called `MCPServer`). It is managed with `uv` and runs over stdio locally, or over streamable HTTP with auth for remote use.
 
+## Platform
+
+ROSE runs on **Linux only**. Windows and macOS are not supported.
+
+It is built and tested on Debian with GNOME. It relies on:
+
+- **An X11 session** for window, input and screenshot tools. Wayland works only for the clipboard.
+- **systemd user services** for the server, watcher and tunnel (`deploy/*.service`).
+- **PipeWire/PulseAudio** for audio and the microphone.
+- **AT-SPI** (system Python with `gi`) for the `ui_*` tools.
+- **GNOME** for Trash, quick settings and the wheel's keyboard shortcut.
+
+ROSE Desktop's system commands (open, play sound, record the mic, services, logs, shortcuts) go through one table in `rose/hostos.py`. *Settings › Operating system* lists each command and whether it is installed.
+
 ## Tools
 
 | Group | Tools |
@@ -201,7 +215,7 @@ uv sync
 ### Local (Claude Code, stdio)
 
 ```sh
-claude mcp add -s user rose -- uv --directory /home/roshan/0x/projects/rose-MCP run rose/server.py
+claude mcp add -s user rose -- uv --directory /path/to/rose-MCP run rose/server.py
 ```
 
 ### Remote (HTTP; auth required)
@@ -346,6 +360,7 @@ rose/
   guard.py     # lockdown, rate limit, approvals and grants, untrusted labels, injection tripwire
   auth.py      # OAuth provider, tokens, passphrase, login/approval pages, admin CLI
   config.py    # config.toml (cached), runtime.json, paths
+  hostos.py    # system command per job (open, play_wav, record_mic, services, ...) for ROSE Desktop
   common.py    # ToolError, call logging, subprocess/HTTP/systemd/notification helpers
   cli.py       # the `rose` command
   tunnel.py    # ngrok / Cloudflare tunnel, fail-closed

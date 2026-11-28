@@ -216,13 +216,23 @@ def _state() -> dict:
         return {}
 
 
+_state_lock = threading.Lock()  # the Tk thread and the pull/chat workers all save: no lost updates
+
+
 def _save_state(_push: bool = True, **kw) -> None:
-    old = _state()
-    s = {**old, **kw}
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(s))
+    with _state_lock:
+        old = _state()
+        s = {**old, **kw}
+        if _push and "clap" in kw:
+            s["clap_at"] = time.time()  # changed here: a pull in the next seconds mustn't undo it before the push lands
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(s))
+        os.replace(tmp, STATE_FILE)  # atomic: a reader never sees half a file
     if _push and "caveman" in kw and bool(kw["caveman"]) != bool(old.get("caveman", True)):
         threading.Thread(target=push_caveman, daemon=True).start()
+    if _push and "clap" in kw and bool(kw["clap"]) != bool(old.get("clap", False)):
+        threading.Thread(target=push_clap, daemon=True).start()
 
 
 _cave_lock = threading.Lock()
@@ -259,6 +269,55 @@ def pull_caveman() -> None:
         push_caveman()  # first app to sync: share ours
     elif bool(on) != bool(_state().get("caveman", True)):
         _save_state(_push=False, caveman=bool(on))
+
+
+# ---------------------------------------------------------------- double clap to talk
+# ONE switch for every Rose app, like caveman mode: companion.json "clap" here, rose-phone /api/clap for the
+# phone app and the ROSE Desktop dashboard. A double clap does what the talk hotkey does.
+
+def ears_wanted() -> tuple[bool, bool]:
+    """(wake word, double clap): what her always-on mic listens for. The wake word needs its Vosk model."""
+    st = _state()
+    try:
+        from rose import wake
+
+        wake_ok = wake.available()
+    except Exception:
+        wake_ok = False
+    return bool(st.get("wake", True)) and wake_ok, bool(st.get("clap", False))
+
+
+def push_clap() -> None:
+    """Post this laptop's clap switch to rose-phone, which keeps it and tells the open phone apps."""
+    base, token = _backend()
+    if not token:
+        return
+    with _cave_lock:
+        body = {"on": bool(_state().get("clap", False)), "client": "desktop"}
+        req = urllib.request.Request(f"{base}/api/clap", data=json.dumps(body).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=5).read()
+        except (OSError, ValueError):
+            pass  # rose-phone down: the next pull shares ours if it has none
+
+
+def pull_clap() -> None:
+    """Take rose-phone's clap switch into companion.json (the phone app may have changed it)."""
+    base, token = _backend()
+    if not token:
+        return
+    req = urllib.request.Request(f"{base}/api/clap", headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            on = json.loads(resp.read()).get("on")
+    except (OSError, ValueError):
+        return
+    st = _state()
+    if on is None or time.time() - float(st.get("clap_at", 0) or 0) < 15:
+        push_clap()  # first app to sync, or ours just changed: share ours
+    elif bool(on) != bool(st.get("clap", False)):
+        _save_state(_push=False, clap=bool(on))
 
 
 def _backend() -> tuple[str, str]:
@@ -1376,8 +1435,8 @@ class Companion(tk.Tk):
         self.sys_proud_until = self.worried_at = -1e9
         self.bubble = Bubble(self)
         self.hidden = False  # closed to the background: windows away, wake word and hotkey still running
-        if _state().get("wake", True):
-            self._wake_start()
+        self.ears = ears_wanted()  # (wake word, double clap)
+        self._wake_guard()
         self.hotkey = None
         self.hotkey_label = ""
         self._hotkey_start()
@@ -1448,6 +1507,9 @@ class Companion(tk.Tk):
         self.wake_var = tk.BooleanVar(value=_state().get("wake", True) and wake.available())
         self.menu.add_checkbutton(label='Listen for "Hey Rose" (offline)', variable=self.wake_var,
                                   command=self._toggle_wake)
+        self.clap_var = tk.BooleanVar(value=_state().get("clap", False))
+        self.menu.add_checkbutton(label="Double clap to talk", variable=self.clap_var,
+                                  command=lambda: (_save_state(clap=self.clap_var.get()), self._wake_guard()))
         self.barge_var = tk.BooleanVar(value=barge_wanted())
         self.menu.add_checkbutton(label="Stop talking when I talk", variable=self.barge_var,
                                   command=lambda: _save_state(barge=self.barge_var.get()))
@@ -1471,9 +1533,11 @@ class Companion(tk.Tk):
     def _wake_start(self):
         from rose import wake
 
-        if not wake.available() or self.wake:
+        if self.wake or not any(self.ears):
             return
         self.wake = wake.WakeListener(
+            on_clap=lambda: self.events.put(("hotkey", None)),  # a double clap = the talk hotkey
+            clap_on=lambda: self.ears[1], wake_on=lambda: self.ears[0],
             on_wake=lambda: self.events.put(("wake", None)),
             on_command=lambda wav: threading.Thread(target=self._transcribe, args=(wav,), daemon=True).start(),
             paused=lambda: self.busy or self.ptt is not None or time.monotonic() < self.talk_until + 0.6,
@@ -1484,8 +1548,12 @@ class Companion(tk.Tk):
     def _wake_guard(self):
         """Her ears must outlive everything, above all while she is closed away and nobody would notice: if
         the wake thread ever died (a Vosk or audio error), start listening again. The mic itself comes back
-        on its own (rose.wake.MicStream)."""
-        if not _state().get("wake", True):
+        on its own (rose.wake.MicStream). The same mic hears double claps; with both off it closes."""
+        self.ears = ears_wanted()
+        if not any(self.ears):
+            if self.wake:
+                self.wake.stop()
+                self.wake = None
             return
         if self.wake is not None and not self.wake.is_alive():
             _log("wake word: the listener stopped; starting it again")
@@ -1517,21 +1585,20 @@ class Companion(tk.Tk):
         self.events.put(("barge_text", wake.strip_wake(text).strip() if text else ""))
 
     def _wake_tick(self):
-        """_tick runs many times a second; her ears only need looking at every 10 s."""
+        """_tick runs many times a second; her ears only need looking at every 2 s (a switch flipped in the
+        dashboard), and the phone's clap switch every 10 s."""
         now = time.monotonic()
-        if now - getattr(self, "_wake_checked", 0) < 10:
+        if now - getattr(self, "_wake_checked", 0) < 2:
             return
         self._wake_checked = now
+        if now - getattr(self, "_clap_pulled", 0) >= 10:
+            self._clap_pulled = now
+            threading.Thread(target=pull_clap, daemon=True).start()
         self._wake_guard()
 
     def _toggle_wake(self):
-        on = self.wake_var.get()
-        _save_state(wake=on)
-        if on:
-            self._wake_start()
-        elif self.wake:
-            self.wake.stop()
-            self.wake = None
+        _save_state(wake=self.wake_var.get())
+        self._wake_guard()
 
     def _transcribe(self, wav: bytes):
         from rose import wake

@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 
-from rose import guard, health, tunnel
+from rose import guard, health, hostos, tunnel
 from rose.config import CONFIG_PATH, LOG_DIR, ROSE_HOME, load_config, update_settings
 
 _out_lock = threading.Lock()
@@ -29,12 +29,26 @@ _frame_lock = threading.Lock()
 
 
 def _systemctl(*args: str) -> tuple[bool, str]:
-    r = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+    r = subprocess.run([*hostos.command("services"), *args], capture_output=True, text=True)
     return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 
 def _detach(*cmd: str) -> None:
-    subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    hostos.detach(*cmd)
+
+
+# ---------------- host OS (Settings) ----------------
+
+def os_info() -> dict:
+    return hostos.info()
+
+
+def os_set(value: str) -> dict:
+    value = str(value).strip().lower()
+    if value != "auto" and value not in hostos.SUPPORTED:
+        raise ValueError(f"Unknown OS {value!r}: pick auto, {', '.join(hostos.SUPPORTED)}.")
+    update_settings({"host_os": value})
+    return hostos.info()
 
 
 # ---------------- overview / remote ----------------
@@ -55,7 +69,7 @@ def snapshot(force_probe: bool = False) -> dict:
     s["remote_calls_today_n"] = len(s.pop("remote_calls_today"))
     s["grant"] = s.pop("gui_grant", None)
     s["config_path"] = str(CONFIG_PATH)
-    s["face_running"] = subprocess.run(["pgrep", "-f", "[r]ose face"], capture_output=True).returncode == 0
+    s["face_running"] = hostos.process_running("rose face")
     return s
 
 
@@ -63,6 +77,8 @@ def _remote_unit(svc: dict) -> str:
     for unit in ("rose-tunnel", "rose-remote"):
         if svc.get(unit) == "active":
             return unit
+    if not hostos.supports("services"):
+        return "rose-tunnel"
     return "rose-tunnel" if _systemctl("cat", "rose-tunnel")[0] else "rose-remote"
 
 
@@ -154,7 +170,8 @@ _MK_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
 
 
 def _gs(*args: str) -> str:
-    return subprocess.run(["gsettings", *args], capture_output=True, text=True, timeout=5).stdout.strip()
+    argv = [*hostos.command("desktop_shortcuts"), *args]
+    return subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout.strip()
 
 
 def _wheel_entry() -> tuple[list[str], str]:
@@ -171,7 +188,7 @@ def _wheel_shortcut() -> str:
     try:
         _, path = _wheel_entry()
         return _gs("get", f"{_MK}.custom-keybinding:{path}", "binding").strip("'") if path else ""
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, hostos.Unsupported):
         return ""
 
 
@@ -250,20 +267,20 @@ def wheel_button(on: bool | None = None) -> dict:
 def open_path(what: str) -> str:
     target = {"logs": LOG_DIR, "config": CONFIG_PATH, "data": ROSE_HOME,
               "screenshots": ROSE_HOME / "screenshots", "recordings": ROSE_HOME / "recordings"}[what]
-    _detach("xdg-open", str(target))
+    hostos.open_target(str(target))
     return "Opened."
 
 
 def open_url(url: str) -> str:
     if not url.startswith(("https://", "http://")):
         raise ValueError("http(s) only")
-    _detach("xdg-open", url)
+    hostos.open_target(url)
     return "Opened."
 
 
 def logs(kind: str = "tools", n: int = 200) -> str:
     if kind in ("rose", "rose-watch", "rose-tunnel", "rose-phone"):
-        r = subprocess.run(["journalctl", "--user", "-u", kind, "-n", str(n), "--no-pager", "-o", "short-iso"],
+        r = subprocess.run([*hostos.command("service_logs"), "-u", kind, "-n", str(n), "--no-pager", "-o", "short-iso"],
                            capture_output=True, text=True, timeout=20)
         return r.stdout[-200_000:]
     r = subprocess.run(["rose", "logs", "-n", str(n), "--kind", kind], capture_output=True, text=True, timeout=20)
@@ -962,6 +979,7 @@ def rose_info() -> dict:
     from rose import companion, face_electron, face_look
 
     companion.pull_caveman()  # shared with the phone: show its current value
+    companion.pull_clap()
     st = companion._state()
     try:
         from rose import wake
@@ -973,6 +991,7 @@ def rose_info() -> dict:
     return {"look": face_look.load(), "defaults": face_look.DEFAULTS, "skins": list(face_look.SKINS),
             "speak": bool(st.get("speak", False)), "caveman": bool(st.get("caveman", True)),
             "wake": bool(st.get("wake", True)) and wake_ok, "wake_available": wake_ok,
+            "clap": bool(st.get("clap", False)),
             "ui": st.get("face_ui", "electron"), "electron_available": face_electron.launcher() is not None,
             "running": companion._running_pid() is not None, "hotkey": companion.hotkey_spec(),
             "hidden": bool(st.get("hidden")),  # running but closed away: no windows, still listening
@@ -993,10 +1012,10 @@ def rose_look_reset() -> dict:
 
 
 def rose_setting(key: str, value: object) -> str:
-    """speak / caveman: saved (a running face follows at once). wake / ui: saved, and the face restarts."""
+    """speak / caveman / clap: saved (a running face follows within 2 s). wake / ui: saved, and the face restarts."""
     from rose import companion
 
-    if key in ("speak", "caveman"):
+    if key in ("speak", "caveman", "clap"):
         companion._save_state(**{key: bool(value)})
         return "OK"
     if key == "wake":
@@ -1026,7 +1045,7 @@ def rose_test_voice(voice: str = "", rate: float = 1.0, text: str = "") -> str:
     with tempfile.NamedTemporaryFile(suffix=".wav") as f:
         f.write(audio)
         f.flush()
-        subprocess.run(["paplay", f.name], timeout=60)
+        subprocess.run(hostos.command("play_wav", path=f.name), timeout=60)
     return "OK"
 
 
@@ -1088,7 +1107,7 @@ def guard_talk(on: bool = True, volume: int = 100) -> str:
             return "Already recording."
         path = g._out(f"talk-{g._stamp()}.wav")
         _talk["path"] = path
-        _talk["proc"] = subprocess.Popen(["pw-record", "--rate", "48000", "--channels", "1", str(path)],
+        _talk["proc"] = subprocess.Popen(hostos.command("record_mic", path=str(path)),
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return "Recording… release to send."
     proc, path = _talk["proc"], _talk["path"]

@@ -496,6 +496,8 @@ def run() -> int:
     from rose import maintenance
     state = _load(STATE, {})
     state["started"] = datetime.now().isoformat(timespec="seconds")
+    state.pop("active_since", None)  # a fresh start (boot/restart) begins a new activity stretch
+    state.pop("break_last_tick", None)
     _save(STATE, state)
     last_sys = last_gh = 0.0
     print("rose watch: running", flush=True)

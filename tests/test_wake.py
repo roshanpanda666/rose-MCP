@@ -178,3 +178,58 @@ def test_record_until_quiet_streams_each_chunk():
     pcm = wake.record_until_quiet(lambda: next(chunks, b""), threading.Event(), start=b"pre!", quiet_s=0.5,
                                   on_chunk=got.append)
     assert got[0] == b"pre!" and b"".join(got) == pcm
+
+
+# ---------------------------------------------------------------- double clap
+
+def clap_audio(clap_times: list[float], length: float = 2.0, noise: float = 0.003, sustained: list | None = None,
+               rate: int = 16000) -> bytes:
+    """Synthetic mic audio: room noise, claps (a 5 ms crack fading out over ~40 ms) at clap_times, and
+    sustained sounds (start, seconds, level: a hum like a held vowel) for the cases that mustn't fire."""
+    import array
+    import math
+    import random
+
+    rnd = random.Random(7)
+    n = int(length * rate)
+    s = [rnd.gauss(0, noise) for _ in range(n)]
+    for t in clap_times:
+        i0 = int(t * rate)
+        for k in range(int(0.08 * rate)):
+            if i0 + k < n:
+                s[i0 + k] += rnd.uniform(-1, 1) * 0.7 * math.exp(-k / (0.008 * rate))
+    for start, secs, level in sustained or []:
+        for k in range(int(secs * rate)):
+            i = int(start * rate) + k
+            if i < n:
+                swell = min(1.0, k / (0.02 * rate))
+                s[i] += level * swell * math.sin(2 * math.pi * 180 * k / rate)
+    return array.array("h", [max(-32767, min(32767, int(v * 32767))) for v in s]).tobytes()
+
+
+def _claps(pcm: bytes) -> int:
+    d = wake.ClapDetector()
+    step = wake.CHUNK * 2
+    return sum(d.feed(pcm[i:i + step]) for i in range(0, len(pcm), step))
+
+
+def test_double_clap_fires_once():
+    assert _claps(clap_audio([0.5, 0.85])) == 1
+
+
+def test_single_clap_or_slow_claps_do_not_fire():
+    assert _claps(clap_audio([0.5])) == 0
+    assert _claps(clap_audio([0.3, 1.5], length=2.5)) == 0  # 1.2 s apart: two separate claps
+
+
+def test_applause_fires_only_once():
+    assert _claps(clap_audio([0.3, 0.6, 0.9, 1.2, 1.5], length=2.5)) == 1
+
+
+def test_talking_does_not_count_as_claps():
+    # two loud held sounds 0.35 s apart, like "hey! hey!": they last too long to be claps
+    assert _claps(clap_audio([], sustained=[(0.4, 0.25, 0.4), (0.75, 0.25, 0.4)])) == 0
+
+
+def test_claps_in_a_noisy_room_still_count():
+    assert _claps(clap_audio([0.5, 0.8], noise=0.02)) == 1

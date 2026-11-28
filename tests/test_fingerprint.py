@@ -589,17 +589,25 @@ def test_push_opens_app_when_registered(appmode, monkeypatch):
 
 # ---------------- trusted clients (the Rose apps) ----------------
 
-def test_trusted_client_never_asks(fpmode, settings):
-    settings(fingerprint_trusted_clients=["Phone app"])
+def test_trusted_client_skips_fingerprint_for_everyday_tools_only(fpmode, settings):
+    settings(fingerprint_trusted_clients=["Phone app"], fingerprint_trusted_reads_need_window=False)
     fpmode["who"]["c"] = "Phone app"
-    assert guard.guarded("phone_call", lambda: "called", read_only=False)() == "called"
-    assert guard.guarded("webcam_capture", lambda: "photo", read_only=False)()["content"] == "photo"
+    assert guard.guarded("read_file", lambda path="x": "text", read_only=True)()["content"] == "text"
+    assert guard.guarded("system_status", lambda: "ok", read_only=True)() == "ok"
+    # fresh calls (calls, camera, code-running, confirm=true) still need the fingerprint, even from the apps
+    assert guard.guarded("phone_call", lambda: "called", read_only=False)()["status"] == "approval_required"
+    assert guard.guarded("webcam_capture", lambda: "photo", read_only=False)()["status"] == "approval_required"
+    assert guard.guarded("hand_to_claude", lambda task="t": "ok", read_only=False)()["status"] == "approval_required"
+
+    def closer(title: str = "w", confirm: bool = False) -> str:
+        return "closed"
+    assert guard.guarded("close_window", closer, read_only=False)(confirm=True)["status"] == "approval_required"
     fpmode["who"]["c"] = "Claude (test)"
     assert guard.guarded("phone_call", lambda: "called", read_only=False)()["status"] == "approval_required"
 
 
 def test_trusted_client_still_blocked_when_locked_or_lost(fpmode, settings, phone):
-    settings(fingerprint_trusted_clients=["Phone app"])
+    settings(fingerprint_trusted_clients=["Phone app"], fingerprint_trusted_reads_need_window=False)
     fpmode["who"]["c"] = "Phone app"
     phone("locked")
     with pytest.raises(ToolError, match="locked"):
@@ -612,3 +620,120 @@ def test_trusted_client_still_blocked_when_locked_or_lost(fpmode, settings, phon
         assert res["status"] == "approval_required"
     finally:
         fp.LOST_FLAG.unlink(missing_ok=True)
+
+
+def test_trusted_apps_work_while_locked_when_opted_in(fpmode, settings, phone):
+    settings(fingerprint_trusted_clients=["Phone app"], fingerprint_trusted_when_locked=True, fingerprint_window_minutes=10,
+             fingerprint_trusted_reads_need_window=False)
+    phone("locked")
+    fpmode["who"]["c"] = "Phone app"
+    assert guard.guarded("read_file", lambda path="x": "text", read_only=True)()["content"] == "text"
+    # a fresh call parks for the fingerprint instead of running with the screen off
+    assert guard.guarded("webcam_capture", lambda: "photo", read_only=False)()["status"] == "approval_required"
+    fpmode["who"]["c"] = "Claude (test)"  # any other client: still refused while locked
+    with pytest.raises(ToolError, match="locked"):
+        guard.guarded("read_file", lambda path="x": "text", read_only=True)()
+    fpmode["who"]["c"] = "Phone app"  # lost-phone mode still parks even the apps
+    fp.LOST_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    fp.LOST_FLAG.touch()
+    try:
+        assert guard.guarded("read_file", lambda path="x": "text", read_only=True)()["status"] == "approval_required"
+    finally:
+        fp.LOST_FLAG.unlink(missing_ok=True)
+
+
+def test_window_minutes_allows_an_hour(settings):
+    settings(fingerprint_window_minutes=60)
+    assert fp.window_minutes() == 60
+    settings(fingerprint_window_minutes=500)
+    assert fp.window_minutes() == 60
+
+
+def _age_window(who: str, **shift):
+    """Move a window's timestamps into the past by the given seconds (until / change_until / last_used)."""
+    w = fp._read(fp.WINDOWS, {})
+    for k, s in shift.items():
+        w[who][k] = float(w[who][k]) - s
+    fp._write(fp.WINDOWS, w)
+
+
+def test_change_window_is_shorter_than_read_window(fpmode, settings):
+    settings(fingerprint_window_minutes=60, fingerprint_change_window_minutes=3, fingerprint_idle_minutes=10)
+    calls, fn = _counter()
+    read = guard.guarded("read_file", fn, read_only=True)
+    write = guard.guarded("focus_window", lambda path="x": "wrote", read_only=False)
+    _approve(fpmode["authn"], read("1")["approval_id"])
+    assert write() == "wrote"  # inside the change window
+    _age_window("Claude (test)", change_until=4 * 60)  # change window over, read window still open
+    assert read("2")["content"] == "read 2"
+    assert write()["status"] == "approval_required"
+    assert fp.window_active("Claude (test)") and not fp.window_active("Claude (test)", read_only=False)
+
+
+def test_idle_timeout_ends_window_and_use_resets_it(fpmode, settings):
+    settings(fingerprint_window_minutes=60, fingerprint_idle_minutes=10)
+    calls, fn = _counter()
+    read = guard.guarded("read_file", fn, read_only=True)
+    _approve(fpmode["authn"], read("1")["approval_id"])
+    _age_window("Claude (test)", last_used=9 * 60)
+    assert read("2")["content"] == "read 2"  # still inside idle limit; this call resets the timer
+    _age_window("Claude (test)", last_used=9 * 60)
+    assert read("3")["content"] == "read 3"
+    _age_window("Claude (test)", last_used=11 * 60)
+    assert not fp.window_active("Claude (test)")
+    assert read("4")["status"] == "approval_required"
+    assert calls == ["1", "2", "3"]
+
+
+def test_change_window_never_outlasts_read_window(settings):
+    settings(fingerprint_window_minutes=2, fingerprint_change_window_minutes=10)
+    assert fp.change_window_minutes() == 2
+    settings(fingerprint_window_minutes=60, fingerprint_change_window_minutes=99)
+    assert fp.change_window_minutes() == 60
+
+
+def test_old_window_records_cover_no_changes(fpmode):
+    import time as _t
+    fp._write(fp.WINDOWS, {"Claude (test)": {"until": _t.time() + 600, "approval_id": "x"}})
+    assert not fp.window_active("Claude (test)", read_only=False)
+    assert not fp.window_active("Claude (test)")  # no last_used: treated as idle
+
+
+def test_trusted_app_reads_need_fingerprint_then_read_window(fpmode, settings):
+    settings(fingerprint_window_minutes=60, fingerprint_change_window_minutes=3)
+    fpmode["who"]["c"] = "Phone app"
+    read = guard.guarded("system_status", lambda: ["w"], read_only=True)
+    first = read()
+    assert first["status"] == "approval_required"
+    assert read()["approval_id"] == first["approval_id"]  # a repeated poll reuses the prompt: one push
+    assert _approve(fpmode["authn"], first["approval_id"])["status"] == "done"
+    assert read() == ["w"]  # inside the read window
+
+
+def test_trusted_reads_free_when_turned_off(fpmode, settings):
+    settings(fingerprint_trusted_reads_need_window=False)
+    fpmode["who"]["c"] = "Phone app"
+    assert guard.guarded("system_status", lambda: ["w"], read_only=True)() == ["w"]
+
+
+def test_trusted_app_changes_need_change_window(fpmode, settings):
+    settings(fingerprint_window_minutes=60, fingerprint_change_window_minutes=3,
+             fingerprint_trusted_reads_need_window=False)
+    fpmode["who"]["c"] = "Phone app"
+    read = guard.guarded("system_status", lambda: ["w"], read_only=True)
+    change = guard.guarded("focus_window", lambda: "focused", read_only=False)
+    assert read() == ["w"]
+    parked = change()
+    assert parked["status"] == "approval_required"
+    assert _approve(fpmode["authn"], parked["approval_id"])["status"] == "done"
+    assert change() == "focused"  # inside the change window
+    _age_window("Phone app", change_until=4 * 60)
+    assert change()["status"] == "approval_required"
+    assert read() == ["w"]
+
+
+def test_trusted_app_old_behaviour_when_turned_off(fpmode, settings):
+    settings(fingerprint_trusted_changes_need_window=False)
+    fpmode["who"]["c"] = "Phone app"
+    change = guard.guarded("focus_window", lambda: "focused", read_only=False)
+    assert change() == "focused"

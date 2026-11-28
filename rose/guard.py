@@ -430,7 +430,8 @@ def guarded(name: str, fn: Callable, read_only: bool) -> Callable:
             if fingerprint.applies_to(who, is_remote(who)):
                 bound = {k: v for k, v in inspect.signature(fn).bind_partial(*args, **kwargs).arguments.items()
                          if k != "confirm"}
-                parked = fingerprint.gate(name, bound, who, fresh=needs_fresh(name, {**bound, **kwargs}))
+                parked = fingerprint.gate(name, bound, who, fresh=needs_fresh(name, {**bound, **kwargs}),
+                                          read_only=read_only)
                 if parked is not None:
                     return parked
                 try:

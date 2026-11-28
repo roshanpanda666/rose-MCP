@@ -8,11 +8,16 @@ How a remote call is decided (guard.guarded calls gate()):
 1. Lost-phone mode armed (`rose fingerprint lost on`): every call parks and only the laptop fallback
    (passphrase + a physical key press on the laptop) approves it.
 2. Phone locked (ADB keyguard / screen asleep) -> the call is refused at once.
-3. Trusted clients (fingerprint_trusted_clients, default the Rose apps: "Phone app") run every tool without
-   a fingerprint, while the phone isn't locked.
-4. A short window (fingerprint_window_minutes, 1-10, default 2) opened by the last fingerprint lets that
-   same caller run non-"fresh" tools without asking, only while the phone is known to be unlocked. It ends
-   at once when the phone locks. Fresh tools (calls, messages, camera, mic) always need a new fingerprint.
+3. Trusted clients (fingerprint_trusted_clients, default the Rose apps: "Phone app") follow rule 4 like everyone
+   else by default: reads and changes both need a fingerprint, then the windows cover them
+   (fingerprint_trusted_reads_need_window / fingerprint_trusted_changes_need_window, default on; off = that tier
+   runs without a fingerprint while the phone isn't locked). "Fresh" calls (calls, messages, camera, mic, code-running,
+   file-changing, confirm=true) still need a fingerprint from them too.
+4. A window opened by the last fingerprint lets that same caller run non-"fresh" tools without asking, only
+   while the phone is known to be unlocked. It has two tiers: read-only tools for fingerprint_window_minutes
+   (1-60, default 2), tools that change something for only fingerprint_change_window_minutes (1-60, default 3).
+   It also ends after fingerprint_idle_minutes (1-60, default 10) with no calls from that caller, and at once
+   when the phone locks. Fresh tools (calls, messages, camera, mic) always need a new fingerprint.
 5. Live frames (webcam_live_frame / screen_frame) run while the matching stream start was approved for
    this caller, until the phone locks or the stream stops.
 6. Anything else parks: the phone gets a push that opens the approval page; "Approve with fingerprint"
@@ -124,11 +129,26 @@ def enabled() -> bool:
     return mode() == "fingerprint"
 
 
-def window_minutes() -> int:
+def _minutes(key: str, default: int, top: int) -> int:
     try:
-        return min(10, max(1, int(load_config().get("fingerprint_window_minutes", 2))))
+        return min(top, max(1, int(load_config().get(key, default))))
     except (TypeError, ValueError):
-        return 2
+        return default
+
+
+def window_minutes() -> int:
+    """How long a fingerprint covers read-only tools."""
+    return _minutes("fingerprint_window_minutes", 2, 60)
+
+
+def change_window_minutes() -> int:
+    """How long a fingerprint covers tools that change something (never longer than the read window)."""
+    return min(window_minutes(), _minutes("fingerprint_change_window_minutes", 3, 60))
+
+
+def idle_minutes() -> int:
+    """A window ends after this many minutes without a call from its caller."""
+    return _minutes("fingerprint_idle_minutes", 10, 60)
 
 
 def trusted(who: str) -> bool:
@@ -446,24 +466,46 @@ def lock_loop() -> None:
 
 # ---------------- windows and live-view tickets ----------------
 
-def window_active(who: str) -> bool:
+def _live(v: dict, now: float, read_only: bool = True) -> bool:
+    if float(v.get("until", 0)) <= now or now - float(v.get("last_used", 0)) > 60 * idle_minutes():
+        return False
+    return read_only or float(v.get("change_until", 0)) > now
+
+
+def window_active(who: str, read_only: bool = True) -> bool:
+    """The caller's window covers this kind of call (read-only, or one that changes something)."""
     w = _read(WINDOWS, {}).get(who)
-    return bool(w) and float(w.get("until", 0)) > time.time()
+    return bool(w) and _live(w, time.time(), read_only)
+
+
+def use_window(who: str, read_only: bool) -> bool:
+    """Check the window and, when it covers the call, reset its idle timer."""
+    with _file_lock:
+        now = time.time()
+        w = _read(WINDOWS, {})
+        v = w.get(who)
+        if not v or not _live(v, now, read_only):
+            return False
+        v["last_used"] = now
+        _write(WINDOWS, w)
+        return True
 
 
 def open_window(who: str, approval_id: str) -> None:
     with _file_lock:
-        w = {k: v for k, v in _read(WINDOWS, {}).items() if float(v.get("until", 0)) > time.time()}
-        w[who] = {"until": time.time() + 60 * window_minutes(), "approval_id": approval_id}
+        now = time.time()
+        w = {k: v for k, v in _read(WINDOWS, {}).items() if _live(v, now)}
+        w[who] = {"until": now + 60 * window_minutes(), "change_until": now + 60 * change_window_minutes(),
+                  "last_used": now, "approval_id": approval_id}
         _write(WINDOWS, w)
-    _event("window_opened", who=who, minutes=window_minutes())
+    _event("window_opened", who=who, minutes=window_minutes(), change_minutes=change_window_minutes())
 
 
 def end_windows(reason: str = "") -> int:
     """End every fingerprint window and live-view ticket; returns how many were active."""
     with _file_lock:
         now = time.time()
-        n = sum(1 for v in _read(WINDOWS, {}).values() if float(v.get("until", 0)) > now)
+        n = sum(1 for v in _read(WINDOWS, {}).values() if _live(v, now))
         n += sum(1 for c in _read(STREAMS, {}).values() for u in c.values() if float(u) > now)
         WINDOWS.unlink(missing_ok=True)
         STREAMS.unlink(missing_ok=True)
@@ -495,10 +537,13 @@ def status() -> dict:
     now = time.time()
     return {"mode": mode(), "passkeys": [p["name"] for p in list_passkeys() + list_device_keys()],
             "phone": _read(LOCK_STATE, {}).get("state", "unknown"), "lost_mode": lost_armed(),
-            "window_minutes": window_minutes(),
+            "window_minutes": window_minutes(), "change_window_minutes": change_window_minutes(),
+            "idle_minutes": idle_minutes(),
             "trusted": [c for c in (load_config().get("fingerprint_trusted_clients", ["Phone app"]) or [])
                         if isinstance(c, str)],
-            "windows": {k: int(v["until"] - now) for k, v in _read(WINDOWS, {}).items() if v.get("until", 0) > now}}
+            "windows": {k: {"read_s": int(v["until"] - now),
+                            "change_s": max(0, int(float(v.get("change_until", 0)) - now))}
+                        for k, v in _read(WINDOWS, {}).items() if _live(v, now)}}
 
 
 # ---------------- per-call notifications ----------------
@@ -567,8 +612,8 @@ def _new_approval(name: str, args: dict, who: str, fresh: bool, lost: bool = Fal
     summary = guard._describe(name, args)
     mins = 0 if (fresh or lost or test) else window_minutes()
     if mins:
-        summary += (f" (approving also lets {who} run other non-sensitive ROSE tools for {mins} minutes, "
-                    "until your phone locks)")
+        summary += (f" (approving also lets {who} read with ROSE for {mins} minutes and make changes for "
+                    f"{change_window_minutes()} minutes, until your phone locks or {idle_minutes()} idle minutes)")
     rec = {"id": aid, "tool": name, "args": args, "caller": who, "created": time.time(), "status": "pending",
            "summary": summary, "grant_minutes": 0, "mode": "fingerprint", "fresh": bool(fresh),
            "window_minutes": mins, "lost": bool(lost), "test": bool(test),
@@ -598,18 +643,21 @@ def _new_approval(name: str, args: dict, who: str, fresh: bool, lost: bool = Fal
     }
 
 
-def _pending_for(who: str, name: str) -> dict | None:
-    """An existing pending fingerprint approval for this caller+tool (so polled tools don't spam the phone)."""
+def _pending_for(who: str, name: str, args: dict | None = None) -> dict | None:
+    """An existing pending fingerprint approval for this caller+tool (so polled tools don't spam the phone).
+    With args, only one for exactly the same arguments (approving it runs that call, not a different one)."""
     from rose import guard
     for p in sorted(guard.APPROVAL_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
         rec = guard.load_approval(p.stem)
         if rec and rec["status"] == "pending" and rec.get("mode") == "fingerprint" and rec["caller"] == who \
-                and rec["tool"] == name:
+                and rec["tool"] == name and not rec.get("lost") and not rec.get("test") \
+                and (args is None or (rec.get("args") == args and not rec.get("fresh"))) \
+                and time.time() - float(rec.get("created", 0)) < guard.APPROVAL_TTL - 30:
             return rec
     return None
 
 
-def gate(name: str, bound: dict, who: str, fresh: bool = False) -> dict | None:
+def gate(name: str, bound: dict, who: str, fresh: bool = False, read_only: bool = False) -> dict | None:
     """Decide one gated call: None = run it now; a dict = parked (approval link); raises ToolError = denied.
     fresh=True (code-running, data-moving, confirm=true calls): never covered by an open window."""
     if name in ALWAYS_ALLOWED:
@@ -619,12 +667,28 @@ def gate(name: str, bound: dict, who: str, fresh: bool = False) -> dict | None:
         _event("lost_mode_park", name, who)
         return _new_approval(name, bound, who, fresh=True, lost=True)
     state = lock_state()
+    fresh = fresh or name in fresh_tools()
+    if trusted(who) and fresh:
+        # The Rose apps skip the fingerprint for everyday tools only. Calls, messages, camera, mic, code-running,
+        # file-changing and confirm=true actions still need one, so a leaked app token can't do them alone.
+        _event("trusted_needs_fresh", name, who)
+        return _new_approval(name, bound, who, fresh=True)
+    # Trusted apps follow the same windows as everyone else by default: one fingerprint, then reads for
+    # fingerprint_window_minutes and changes for fingerprint_change_window_minutes. Someone holding the unlocked
+    # phone can then neither read nor drive the laptop through the app. Each tier can be switched back off.
+    cfg = load_config()
+    free = trusted(who) and (
+        (read_only and not cfg.get("fingerprint_trusted_reads_need_window", True))
+        or (not read_only and not cfg.get("fingerprint_trusted_changes_need_window", True)))
+    if state == "locked" and free and load_config().get("fingerprint_trusted_when_locked", False):
+        _event("allowed_trusted_locked", name, who)  # the Rose apps with the screen off (opt-in)
+        return None
     if state == "locked":
         _event("denied_phone_locked", name, who)
         raise ToolError("The user's phone is locked, so ROSE refuses every action right now. Tell the user to "
                         "unlock their phone and ask again (or, if the phone is lost, use `rose fingerprint lost on` "
                         "on the laptop).")
-    if trusted(who):  # the Rose apps: no fingerprint (lost-phone mode and a locked phone were checked above)
+    if free:  # the Rose apps: no fingerprint (lost-phone mode and a locked phone were checked above)
         _event("allowed_trusted", name, who)
         return None
     if name in STREAM_OF_FRAME:
@@ -634,12 +698,11 @@ def gate(name: str, bound: dict, who: str, fresh: bool = False) -> dict | None:
         if name == "webcam_live_frame":
             raise ToolError("No approved webcam live view: call webcam_live_stream first (it needs the user's "
                             "fingerprint), then poll webcam_live_frame.")
-    fresh = fresh or name in fresh_tools()
-    if not fresh and state == "unlocked" and window_active(who):
+    if not fresh and state == "unlocked" and use_window(who, read_only):
         _event("allowed_window", name, who)
         return None
-    if name in LIVE_FRAMES:  # polled many times a second: one pending approval at a time
-        existing = _pending_for(who, name)
+    if name in LIVE_FRAMES or not fresh:  # polled / retried calls: one pending approval at a time, one push
+        existing = _pending_for(who, name, None if name in LIVE_FRAMES else bound)
         if existing:
             from rose import guard
             return {"status": "approval_required", "approval_id": existing["id"],
@@ -1444,10 +1507,11 @@ def cli(argv: list[str]) -> int:  # noqa: C901 (one branch per subcommand)
         print(f"Approval mode: {st['mode']}")
         print(f"Passkeys: {', '.join(st['passkeys']) or 'none'}")
         print(f"Phone (last seen): {st['phone']}    Lost-phone mode: {'ON' if st['lost_mode'] else 'off'}")
-        print(f"Window after a fingerprint: {st['window_minutes']} min")
+        print(f"Window after a fingerprint: {st['window_minutes']} min for reads, "
+              f"{st['change_window_minutes']} min for changes, ends after {st['idle_minutes']} min idle")
         print(f"No fingerprint needed (trusted): {', '.join(st['trusted']) or 'none'}")
         for who, left in st["windows"].items():
-            print(f"  open window: {who} ({left} s left)")
+            print(f"  open window: {who} (reads {left['read_s']} s, changes {left['change_s']} s left)")
     elif cmd == "test":
         if not list_passkeys() and not has_app_key():
             print("Register a passkey first: rose fingerprint register")

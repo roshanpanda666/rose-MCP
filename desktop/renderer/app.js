@@ -1103,7 +1103,29 @@ $("wheelRun").onclick = () => act($("wheelRun"), "wheel_do", { action: $("wheelR
 $("setWheelButton").onchange = (e) => api("wheel_button", { on: e.target.checked })
   .then((r) => { toast(r?.shown ? "Wheel button shown" : "Wheel button hidden: the shortcut opens the wheel", "ok"); loadWheel(); })
   .catch(() => {});
-loaders.settings = renderThemeGrid;
+
+/* ---------------- settings / operating system ---------------- */
+function renderOs(info) {
+  const sel = $("setHostOs");
+  sel.replaceChildren(...info.options.map((o) => el("option", { value: o.value }, o.label)));
+  sel.value = info.setting;
+  const name = info.options.find((o) => o.value === info.current)?.label || info.current;
+  $("osPill").textContent = name;
+  $("osPill").className = `pill ${info.mismatch ? "warn" : "ok"}`;
+  $("osWarn").hidden = !info.mismatch;
+  $("osWarn").textContent = info.mismatch
+    ? `Detected ${info.options.find((o) => o.value === info.detected)?.label}, but set to ${name}: commands for ${name} will be used.` : "";
+  $("osJobs").replaceChildren(...info.jobs.map((j) => {
+    const [cls, mark, note] = !j.supported ? ["no", "✕", "not available on this OS yet"]
+      : j.installed ? ["ok", "✓", j.command] : ["no", "!", `${j.command} (not installed)`];
+    return el("li", null, el("span", { class: cls }, mark), " ", j.purpose, " ", el("span", { class: "muted" }, `— ${note}`));
+  }));
+}
+async function loadOs() { try { renderOs(await api("os_info", {}, { quiet: true })); } catch { /* backend not ready */ } }
+$("setHostOs").onchange = (e) => api("os_set", { value: e.target.value })
+  .then((info) => { renderOs(info); toast(`OS set to ${$("osPill").textContent}`, "ok"); })
+  .catch(loadOs);
+loaders.settings = () => { renderThemeGrid(); loadOs(); };
 
 /* ---------------- Rose (her desktop face): look, animation, colours, voice ---------------- */
 const roseUI = (() => {
@@ -1205,6 +1227,7 @@ const roseUI = (() => {
     $("roseState").className = "pill " + (info.running ? "ok" : "warn");
     $("roseSpeak").checked = info.speak; $("roseCaveman").checked = info.caveman;
     $("roseWake").checked = info.wake; $("roseWake").disabled = !info.wake_available;
+    $("roseClap").checked = !!info.clap;
     $("roseUi").value = info.ui; $("roseUi").querySelector('[value="electron"]').disabled = !info.electron_available;
     $("roseHotkey").textContent = (info.hotkey ? `Talk hotkey: ${info.hotkey.split("+").map((p) => p[0].toUpperCase() + p.slice(1)).join("+")}. ` : "")
       + (info.ui === "tk" ? "The classic face ignores size, animation and colour settings." : "Click her to chat, drag to move, right-click for her menu.");
@@ -1240,6 +1263,8 @@ const roseUI = (() => {
   $("roseSpeak").onchange = (e) => api("rose_setting", { key: "speak", value: e.target.checked }, { quiet: true });
   $("roseCaveman").onchange = (e) => api("rose_setting", { key: "caveman", value: e.target.checked }, { quiet: true });
   $("roseWake").onchange = (e) => api("rose_setting", { key: "wake", value: e.target.checked }).then(() => setTimeout(load, 2500));
+  $("roseClap").onchange = (e) => api("rose_setting", { key: "clap", value: e.target.checked })
+    .then(() => toast(e.target.checked ? "Double clap to talk: on" : "Double clap to talk: off", "ok"));
   $("roseUi").onchange = (e) => api("rose_setting", { key: "ui", value: e.target.value }).then(() => setTimeout(load, 3000));
   $("roseReset").onclick = async () => {
     if (!(await confirmIt("Reset Rose?", "Size, animation, colours and voice go back to the defaults.", "Reset"))) return;

@@ -313,17 +313,67 @@ def test_meeting_announced_once(monkeypatch, pushed):
     assert pushed[0][0] == "📅 Stand-up in 10 min"
 
 
+def _tick_until(st, start, end, idle=0.0, step=30.0):
+    """Tick tick_break every `step` seconds like rose-watch; return the times a reminder fired."""
+    fired, t = [], start
+    while t <= end:
+        if proactive.tick_break(st, idle=idle, now=t):
+            fired.append(t)
+        t += step
+    return fired
+
+
 def test_break_reminder_after_continuous_activity(pushed, settings):
     settings(break_reminder_minutes=120)
     st: dict = {}
     t0 = 1_000_000.0
-    assert not proactive.tick_break(st, idle=0, now=t0)
-    assert not proactive.tick_break(st, idle=0, now=t0 + 119 * 60)
-    assert proactive.tick_break(st, idle=0, now=t0 + 121 * 60)
+    assert _tick_until(st, t0, t0 + 119 * 60) == []
+    fired = _tick_until(st, t0 + 119 * 60 + 30, t0 + 121 * 60)
+    assert len(fired) == 1 and fired[0] == t0 + 120 * 60
     assert "2 hours" in pushed[0][1]
-    assert not proactive.tick_break(st, idle=0, now=t0 + 125 * 60)  # next one only after another stretch
-    assert not proactive.tick_break(st, idle=600, now=t0 + 130 * 60)  # a real break resets
+    assert _tick_until(st, t0 + 121 * 60 + 30, t0 + 125 * 60) == []  # next one only after another stretch
+    assert not proactive.tick_break(st, idle=600, now=t0 + 125 * 60 + 30)  # a real break resets
     assert st["active_since"] is None
+
+
+def test_break_reminder_not_on_boot(pushed, settings):
+    """State saved before shutdown must not count: after boot the clock starts again."""
+    settings(break_reminder_minutes=120)
+    t0 = 1_000_000.0
+    st = {"active_since": t0 - 5 * 3600, "break_last_tick": t0 - 3 * 3600}  # stale, from before the reboot
+    assert not proactive.tick_break(st, idle=5, now=t0)  # first tick after boot, user just logged in
+    assert st["active_since"] == t0 - 5
+    assert _tick_until(st, t0 + 30, t0 + 119 * 60) == []
+    assert len(_tick_until(st, t0 + 119 * 60 + 30, t0 + 121 * 60)) == 1
+
+
+def test_break_reminder_no_last_tick_starts_fresh(pushed, settings):
+    """Old state files (no break_last_tick) with a stale active_since don't fire either."""
+    settings(break_reminder_minutes=120)
+    t0 = 1_000_000.0
+    st = {"active_since": t0 - 10 * 3600}
+    assert not proactive.tick_break(st, idle=0, now=t0)
+    assert st["active_since"] == t0
+
+
+def test_break_reminder_suspend_gap_counts_as_break(pushed, settings):
+    settings(break_reminder_minutes=120)
+    t0 = 1_000_000.0
+    st: dict = {}
+    assert _tick_until(st, t0, t0 + 100 * 60) == []
+    # laptop suspended 30 min; input idle reads small right after resume
+    assert not proactive.tick_break(st, idle=2, now=t0 + 130 * 60)
+    assert st["active_since"] == t0 + 130 * 60 - 2
+    assert _tick_until(st, t0 + 130 * 60 + 30, t0 + 249 * 60) == []
+
+
+def test_break_reminder_short_pause_does_not_reset(pushed, settings):
+    settings(break_reminder_minutes=120)
+    t0 = 1_000_000.0
+    st: dict = {}
+    assert _tick_until(st, t0, t0 + 60 * 60) == []
+    assert _tick_until(st, t0 + 60 * 60 + 30, t0 + 64 * 60, idle=200) == []  # under 5 min: not a break
+    assert len(_tick_until(st, t0 + 64 * 60 + 30, t0 + 121 * 60)) == 1
 
 
 def test_phone_battery_alert(monkeypatch, pushed):

@@ -241,16 +241,20 @@ class RoseOAuthProvider:
         return None
 
     @staticmethod
-    def _add_tokens(s: dict, client_id: str, scopes: list[str], resource: str | None) -> OAuthToken:
-        """Create a fresh access/refresh pair in state `s` (caller holds _lock and saves)."""
+    def _add_tokens(s: dict, client_id: str, scopes: list[str], resource: str | None,
+                    family: str | None = None) -> OAuthToken:
+        """Create a fresh access/refresh pair in state `s` (caller holds _lock and saves).
+        `family` ties every pair rotated from one sign-in together, so a reused refresh token can revoke them all."""
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        family = family or secrets.token_hex(8)
         now = int(time.time())
         s["access"] = {k: v for k, v in s["access"].items() if v["expires_at"] > now}
         s["refresh"] = {k: v for k, v in s["refresh"].items() if v["expires_at"] > now}
+        s["spent"] = {k: v for k, v in s.get("spent", {}).items() if v["expires_at"] > now}
         s["access"][_h(access)] = {"client_id": client_id, "scopes": scopes, "resource": resource,
-                                   "expires_at": now + ACCESS_TTL}
+                                   "expires_at": now + ACCESS_TTL, "family": family}
         s["refresh"][_h(refresh)] = {"client_id": client_id, "scopes": scopes, "resource": resource,
-                                     "expires_at": now + REFRESH_TTL}
+                                     "expires_at": now + REFRESH_TTL, "family": family}
         return OAuthToken(access_token=access, token_type="Bearer", expires_in=ACCESS_TTL,
                           scope=" ".join(scopes), refresh_token=refresh)
 
@@ -295,7 +299,30 @@ class RoseOAuthProvider:
         if g:
             return RefreshToken(token=refresh_token, client_id=g["client_id"], scopes=g["scopes"],
                                 expires_at=g["expires_at"], resource=g["resource"], subject="owner")
+        if _h(refresh_token) in s.get("spent", {}):
+            self._revoke_family(_h(refresh_token))
         return None
+
+    @staticmethod
+    def _revoke_family(spent_hash: str) -> None:
+        """A refresh token that was already rotated came back: someone holds a copy (RFC 9700). Revoke every
+        token rotated from the same sign-in, so a thief who rotated first loses access too."""
+        with _lock:
+            s = load_state()
+            spent = s.get("spent", {}).pop(spent_hash, None)
+            if not spent:
+                return
+            fam, cid = spent.get("family"), spent["client_id"]
+
+            def hit(v: dict) -> bool:  # tokens from before families existed: the whole client
+                return v.get("family") == fam if fam else v["client_id"] == cid
+            s["access"] = {k: v for k, v in s["access"].items() if not hit(v)}
+            s["refresh"] = {k: v for k, v in s["refresh"].items() if not hit(v)}
+            s["spent"] = {k: v for k, v in s["spent"].items() if not hit(v)}
+            save_state(s)
+        _log({"event": "oauth_refresh_reuse_revoked", "client_id": cid})
+        print(f"ROSE auth: rotated refresh token REUSED by {client_label(cid)}: revoked that sign-in's tokens "
+              "(sign in again)", file=sys.stderr, flush=True)
 
     async def exchange_refresh_token(self, client, refresh_token: RefreshToken, scopes: list[str]) -> OAuthToken:
         with _lock:
@@ -314,7 +341,10 @@ class RoseOAuthProvider:
                 print(f"ROSE auth: refresh token REUSED by {client_label(client.client_id)}: client must sign in again",
                       file=sys.stderr, flush=True)
                 raise TokenError(error="invalid_grant", error_description="Refresh token already used")
-            tok = self._add_tokens(s, client.client_id, scopes or refresh_token.scopes, refresh_token.resource)
+            tok = self._add_tokens(s, client.client_id, scopes or refresh_token.scopes, refresh_token.resource,
+                                   family=old.get("family"))
+            s["spent"][_h(refresh_token.token)] = {"client_id": client.client_id, "family": old.get("family"),
+                                                   "expires_at": old["expires_at"]}
             save_state(s)
             if _reuse_grace() > 0:
                 self._rotated[_h(refresh_token.token)] = {

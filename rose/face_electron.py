@@ -67,6 +67,7 @@ class Host:
         self.ptt: dict | None = None
         self.ptt_gen = 0
         self.wake = None
+        self.ears = (False, False)  # (wake word, double clap): set by _wake_guard
         self.hotkey = None
         self.hotkey_label = ""
         self.stopping = False
@@ -122,8 +123,7 @@ class Host:
         threading.Thread(target=self._context_loop, daemon=True).start()
         self._hotkey_start()
         st = comp._state()
-        if st.get("wake", True):
-            self._wake_start()
+        self._wake_guard()  # "Hey Rose" and/or the double clap
         if st.get("wheel", True):
             threading.Timer(0.8, comp.start_wheel).start()
         self.send("init", state={k: st.get(k) for k in STATE_KEYS | {"wake", "wheel"}},
@@ -217,13 +217,8 @@ class Host:
         elif cmd == "ptt":
             self.hotkey_pressed(open_chat=False)
         elif cmd == "wake":
-            on = bool(msg.get("on"))
-            comp._save_state(wake=on)
-            if on:
-                self._wake_start()
-            elif self.wake:
-                self.wake.stop()
-                self.wake = None
+            comp._save_state(wake=bool(msg.get("on")))
+            self._wake_guard()
         elif cmd == "ears":  # the face opened its own echo-cancelled mic (or couldn't)
             self.face_ears = bool(msg.get("on"))
             if not self.face_ears and msg.get("error"):
@@ -303,7 +298,8 @@ class Host:
                 if hue is not None:
                     self.send("hue", hue=hue)
             if n % 5 == 0:
-                self._wake_guard()
+                comp.pull_clap()  # the phone app may have flipped the clap switch
+            self._wake_guard()  # every 2 s: a switch flipped in the dashboard takes effect quickly
             n += 1
             time.sleep(2)
 
@@ -320,13 +316,16 @@ class Host:
     def _wake_start(self) -> None:
         from rose import wake
 
-        if not wake.available() or self.wake:
+        if self.wake or not any(self.ears):
             return
+
         def woken():
             self._woken()
             self.wake_voice = self._voice_begin("wake")
 
         self.wake = wake.WakeListener(
+            on_clap=lambda: self.hotkey_pressed(),  # a double clap = the talk hotkey
+            clap_on=lambda: self.ears[1], wake_on=lambda: self.ears[0],
             on_wake=woken,
             on_command=lambda wav: self._voice_end(self.wake_voice),
             paused=lambda: self.busy or self.talking or self.ptt is not None,
@@ -336,8 +335,15 @@ class Host:
 
     def _wake_guard(self) -> None:
         """Her ears must outlive everything, above all while she is closed away to the background and nobody
-        would notice: if the wake thread ever died (a Vosk or audio error), start listening again."""
-        if self.stopping or not comp._state().get("wake", True):
+        would notice: if the wake thread ever died (a Vosk or audio error), start listening again. The same
+        mic hears double claps; with both off it closes."""
+        if self.stopping:
+            return
+        self.ears = comp.ears_wanted()
+        if not any(self.ears):
+            if self.wake:
+                self.wake.stop()
+                self.wake = None
             return
         if self.wake is not None and not self.wake.is_alive():
             comp._log("wake word: the listener stopped; starting it again")

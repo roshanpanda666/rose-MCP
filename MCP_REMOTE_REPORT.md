@@ -6,7 +6,7 @@
 
 | Item | State |
 | --- | --- |
-| ROSE as a remote **Streamable HTTP** MCP connector via **ngrok** | **Working and verified.** 22/22 protocol and auth checks passed over `https://washhouse-serotonin-pennant.ngrok-free.dev/mcp`, and 22/22 locally. |
+| ROSE as a remote **Streamable HTTP** MCP connector via **ngrok** | **Working and verified.** 22/22 protocol and auth checks passed over `https://<your-domain>.ngrok-free.dev/mcp`, and 22/22 locally. |
 | FreeLLMAPI installed and running | **Done.** It is its own service on `127.0.0.1:3001`, with its own `.env`, database and key. Its MCP endpoint has 13 tools. |
 | FreeLLMAPI as a separate connector for Claude Code | **Done.** `freellmapi` → `http://127.0.0.1:3001/mcp` (user scope) shows ✔ Connected. |
 | FreeLLMAPI as extra tools inside ROSE (`freellm_*`, 13 tools) | **Live** (deployed 2026-11-21 at your request). The public URL now serves 86 tools; probe 22/22 again. |
@@ -20,7 +20,7 @@ Per your instruction, nothing that overlaps the existing setup was changed. Thre
 ## 2. Architecture
 
 ```
- claude.ai / phone ──HTTPS──► ngrok edge (washhouse-serotonin-pennant.ngrok-free.dev)
+ claude.ai / phone ──HTTPS──► ngrok edge (<your-domain>.ngrok-free.dev)
                                    │  (ngrok agent, run by rose-tunnel.service)
                                    ▼
  Claude Code (Forge) ──HTTP──► 127.0.0.1:8765  rose serve   (rose.service)
@@ -85,7 +85,7 @@ The probe used a temporary token (`probe-report`) and registered test OAuth clie
 
 ### 3.3 Connecting clients (unchanged, for reference)
 
-- **claude.ai:** Settings → Connectors → Add custom connector → `https://washhouse-serotonin-pennant.ngrok-free.dev/mcp` → approve on ROSE's login page with your passphrase. On ngrok's free plan the browser shows ngrok's "Visit Site" page once. API calls never see it.
+- **claude.ai:** Settings → Connectors → Add custom connector → `https://<your-domain>.ngrok-free.dev/mcp` → approve on ROSE's login page with your passphrase. On ngrok's free plan the browser shows ngrok's "Visit Site" page once. API calls never see it.
 - **Claude Code:** `claude mcp add --scope user --transport http rose http://127.0.0.1:8765/mcp --header "Authorization: Bearer <token from rose auth new-token forge>"` (already set up).
 
 ## 4. FreeLLMAPI

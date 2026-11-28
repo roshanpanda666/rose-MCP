@@ -191,6 +191,13 @@ def tick_break(state: dict, idle: float | None = None, now: float | None = None)
             idle = max(idle, BREAK_IDLE)
     if idle is None:
         return False
+    # A gap since the last check this long (shutdown, reboot, suspend, watcher restart) was a break too.
+    # active_since lives in watch_state.json, so without this a stale value from before a reboot
+    # would fire a reminder on the first tick after boot.
+    last = state.get("break_last_tick")
+    state["break_last_tick"] = now
+    if last is None or now - last >= BREAK_IDLE:
+        state["active_since"] = None
     if idle >= BREAK_IDLE:
         state["active_since"] = None  # that was a break
         return False

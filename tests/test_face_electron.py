@@ -91,6 +91,42 @@ def test_caveman_change_is_posted_once(monkeypatch, tmp_path):
     assert posts == [False]
 
 
+def test_clap_switch_syncs_with_the_phone(monkeypatch, tmp_path):
+    import io
+    import json as _json
+
+    monkeypatch.setattr(companion, "STATE_FILE", tmp_path / "companion.json")
+    monkeypatch.setattr(companion, "_backend", lambda: ("http://phone.test", "tok"))
+    posts, server = [], {"on": None}
+
+    class T:  # run the post inline
+        def __init__(self, target, daemon=None):
+            self.t = target
+
+        def start(self):
+            self.t()
+
+    def urlopen(req, timeout=None):
+        if req.get_method() == "POST":
+            posts.append(_json.loads(req.data)["on"])
+            server["on"] = posts[-1]
+        return io.BytesIO(_json.dumps({"on": server["on"]}).encode())
+
+    monkeypatch.setattr(companion.threading, "Thread", T)
+    monkeypatch.setattr(companion.urllib.request, "urlopen", urlopen)
+    companion.pull_clap()  # the server has none yet: ours (off) is shared
+    assert posts == [False]
+    companion._save_state(clap=True)  # flipped in the dashboard: posted
+    assert posts == [False, True]
+    server["on"] = False  # a stale value right after our change doesn't undo it: ours is sent again
+    companion.pull_clap()
+    assert companion._state()["clap"] is True and posts[-1] is True
+    monkeypatch.setattr(companion.time, "time", lambda: 10 ** 10)  # later, the phone turns it off
+    server["on"] = False
+    companion.pull_clap()
+    assert companion._state()["clap"] is False and posts == [False, True, True]
+
+
 def test_state_and_send(monkeypatch):
     h = _host()
     h.handle({"cmd": "state", "busy": True, "talking": False})
@@ -319,8 +355,11 @@ def test_quit_is_the_only_thing_that_stops_her(monkeypatch):
 
 
 def test_wake_guard_starts_her_ears_again(monkeypatch):
+    from rose import wake
+
     state = {"wake": True}
     monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(wake, "available", lambda: True)
     started = []
     h = _host()
     monkeypatch.setattr(h, "_wake_start", lambda: started.append(h.wake))
@@ -334,6 +373,57 @@ def test_wake_guard_starts_her_ears_again(monkeypatch):
     h.wake = None
     h._wake_guard()
     assert started == [None]
+
+
+def test_double_clap_keeps_her_ears_open_and_closes_them_when_both_are_off(monkeypatch):
+    from rose import wake
+
+    state = {"wake": False, "clap": True}
+    monkeypatch.setattr(companion, "_state", lambda: state)
+    monkeypatch.setattr(wake, "available", lambda: True)
+    started = []
+    h = _host()
+    monkeypatch.setattr(h, "_wake_start", lambda: started.append(1))
+    h._wake_guard()
+    assert started == [1] and h.ears == (False, True)  # the clap alone needs the mic
+    ears = h.wake = _Ears()
+    state["clap"] = False  # both off: the mic closes
+    h._wake_guard()
+    assert ears.stopped and h.wake is None and h.ears == (False, False)
+
+
+def test_wake_listener_claps_without_the_wake_word(monkeypatch):
+    """A double clap runs on_clap even with "Hey Rose" off (Vosk never loads)."""
+    from rose import wake
+
+    claps = []
+    pcm = _double_clap_pcm()
+    chunks = [pcm[i:i + wake.CHUNK * 2] for i in range(0, len(pcm), wake.CHUNK * 2)]
+
+    class Mic:
+        opens = 1
+
+        def __init__(self, *a, **k):
+            pass
+
+        def read(self, n):
+            return chunks.pop(0) if chunks else b""
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(wake, "MicStream", Mic)
+    monkeypatch.setattr(wake, "available", lambda: False)
+    w = wake.WakeListener(on_wake=None, on_command=None, paused=lambda: False, on_clap=lambda: claps.append(1),
+                          clap_on=lambda: True, wake_on=lambda: False)
+    w.run()
+    assert claps == [1]
+
+
+def _double_clap_pcm() -> bytes:
+    from tests.test_wake import clap_audio
+
+    return clap_audio([0.5, 0.85])
 
 
 def test_look_view_and_menu_command(monkeypatch):

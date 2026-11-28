@@ -6,7 +6,18 @@ const os = require("os");
 const fs = require("fs");
 const readline = require("readline");
 
-const ROSE_PY = process.env.ROSE_PYTHON || path.join(os.homedir(), ".local/share/uv/tools/rose/bin/python");
+// The installed ROSE tool's Python (`uv tool install`). uv keeps tools under %APPDATA%\uv\tools on Windows
+// (Scripts\python.exe) and ~/.local/share/uv/tools elsewhere (bin/python).
+function rosePython() {
+  if (process.env.ROSE_PYTHON) return process.env.ROSE_PYTHON;
+  if (process.platform === "win32") {
+    const base = process.env.UV_TOOL_DIR || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "uv", "tools");
+    return path.join(base, "rose", "Scripts", "python.exe");
+  }
+  const base = process.env.UV_TOOL_DIR || path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "uv", "tools");
+  return path.join(base, "rose", "bin", "python");
+}
+const ROSE_PY = rosePython();
 const ICON = path.join(__dirname, "renderer", "icon.png");
 
 let win = null;
